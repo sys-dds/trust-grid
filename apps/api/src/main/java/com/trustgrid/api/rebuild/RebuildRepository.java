@@ -35,7 +35,7 @@ public class RebuildRepository {
                          and not exists (
                            select 1 from participant_restrictions r
                            where r.participant_id = p.id and r.status = 'ACTIVE'
-                             and r.restriction_type = 'HIDDEN_FROM_MARKETPLACE_SEARCH'
+                             and r.restriction_type in ('HIDDEN_FROM_MARKETPLACE_SEARCH', 'LISTING_BLOCKED')
                          ),
                        'POSTGRES_FALLBACK', now(), jsonb_build_object('rebuilt', true)
                 from marketplace_listings l

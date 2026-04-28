@@ -34,6 +34,109 @@ public class TrustPolicyRepository {
         jdbcTemplate.update("update trust_policy_versions set status = 'ACTIVE', activated_at = now() where id = ?", id);
     }
 
+    Map<String, Object> policy(UUID id) {
+        return jdbcTemplate.queryForMap("select * from trust_policy_versions where id = ?", id);
+    }
+
+    boolean risky(UUID id) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from trust_policy_versions p
+                where p.id = ?
+                  and (p.policy_name in ('risk_policy', 'restriction_policy')
+                    or p.policy_json::text like '%requiresApproval%'
+                    or exists (
+                        select 1 from trust_policy_rules r
+                        where r.policy_version_id = p.id
+                          and r.action_json::text ~ '(BLOCK_TRANSACTION|SUSPEND_ACCOUNT|RESTRICT_CAPABILITY|HIDE_LISTING|SUPPRESS_REVIEW_WEIGHT)'
+                    ))
+                """, Integer.class, id);
+        return count != null && count > 0;
+    }
+
+    boolean approved(UUID id) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from policy_approvals where policy_version_id = ? and approval_status = 'APPROVED'
+                """, Integer.class, id);
+        return count != null && count > 0;
+    }
+
+    UUID requestApproval(UUID id, Map<String, Object> request) {
+        UUID approvalId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into policy_approvals (id, policy_version_id, approval_status, requested_by, request_reason)
+                values (?, ?, 'REQUIRED', ?, ?)
+                """, approvalId, id, required(request, "requestedBy"), required(request, "reason"));
+        return approvalId;
+    }
+
+    void approve(UUID id, Map<String, Object> request) {
+        jdbcTemplate.update("""
+                update policy_approvals
+                set approval_status = 'APPROVED', approved_by = ?, approval_reason = ?,
+                    risk_acknowledgement = ?, decided_at = now()
+                where policy_version_id = ? and approval_status = 'REQUIRED'
+                """, required(request, "approvedBy"), required(request, "reason"),
+                required(request, "riskAcknowledgement"), id);
+    }
+
+    void reject(UUID id, Map<String, Object> request) {
+        jdbcTemplate.update("""
+                update policy_approvals
+                set approval_status = 'REJECTED', approved_by = ?, approval_reason = ?,
+                    risk_acknowledgement = ?, decided_at = now()
+                where policy_version_id = ? and approval_status = 'REQUIRED'
+                """, required(request, "approvedBy"), required(request, "reason"),
+                required(request, "riskAcknowledgement"), id);
+    }
+
+    UUID restorePrevious(UUID id) {
+        Map<String, Object> policy = policy(id);
+        UUID previous = jdbcTemplate.queryForObject("""
+                select id from trust_policy_versions
+                where policy_name = ? and status = 'RETIRED' and id <> ?
+                order by retired_at desc nulls last, created_at desc
+                limit 1
+                """, UUID.class, policy.get("policy_name"), id);
+        jdbcTemplate.update("update trust_policy_versions set status = 'RETIRED', retired_at = now() where id = ?", id);
+        jdbcTemplate.update("update trust_policy_versions set status = 'ACTIVE', activated_at = now(), retired_at = null where id = ?", previous);
+        return previous;
+    }
+
+    UUID blastRadius(Map<String, Object> request, Map<String, Object> summary) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into policy_blast_radius_previews (
+                    id, policy_name, from_policy_version, to_policy_version, requested_by, reason,
+                    affected_users, affected_listings, affected_transactions, affected_disputes, summary_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
+                """, id, required(request, "policyName"), request.get("fromPolicyVersion"),
+                required(request, "toPolicyVersion"), required(request, "requestedBy"), required(request, "reason"),
+                ((Number) summary.getOrDefault("affectedUsers", 0)).intValue(),
+                ((Number) summary.getOrDefault("affectedListings", 0)).intValue(),
+                ((Number) summary.getOrDefault("affectedTransactions", 0)).intValue(),
+                ((Number) summary.getOrDefault("affectedDisputes", 0)).intValue(),
+                json(summary));
+        return id;
+    }
+
+    Map<String, Object> policyDataCounts() {
+        return Map.of(
+                "affectedUsers", count("select count(*) from participants where trust_tier in ('NEW','LIMITED') or account_status in ('RESTRICTED','SUSPENDED')"),
+                "affectedListings", count("select count(*) from marketplace_listings where status = 'LIVE' and (risk_tier in ('HIGH','RESTRICTED') or coalesce(price_amount_cents, budget_amount_cents, 0) >= 100000)"),
+                "affectedTransactions", count("select count(*) from marketplace_transactions where status not in ('CANCELLED','COMPLETED') and value_amount_cents >= 50000"),
+                "affectedDisputes", count("select count(*) from marketplace_disputes where status in ('OPEN','UNDER_REVIEW','ESCALATED')"),
+                "newUsersImpacted", count("select count(*) from participants where trust_tier = 'NEW'"),
+                "wouldHideListings", count("select count(*) from marketplace_listings where risk_tier = 'RESTRICTED'"),
+                "wouldBlockTransactions", count("select count(*) from marketplace_transactions where value_amount_cents >= 100000"),
+                "wouldRequireEvidence", count("select count(*) from evidence_requirements where satisfied = false")
+        );
+    }
+
+    int count(String sql) {
+        Integer count = jdbcTemplate.queryForObject(sql, Integer.class);
+        return count == null ? 0 : count;
+    }
+
     void retire(UUID id) {
         jdbcTemplate.update("update trust_policy_versions set status = 'RETIRED', retired_at = now() where id = ?", id);
     }

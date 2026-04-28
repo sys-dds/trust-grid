@@ -111,6 +111,33 @@ public class OpsQueueRepository {
         return jdbcTemplate.queryForList("select * from moderator_actions order by created_at desc");
     }
 
+    Map<String, Object> listingState(UUID id) {
+        return jdbcTemplate.queryForMap("select id, status, moderation_status from marketplace_listings where id = ?", id);
+    }
+
+    Map<String, Object> capabilityState(UUID participantId, String capability) {
+        return jdbcTemplate.queryForList("""
+                select id, participant_id, capability, status from participant_capabilities
+                where participant_id = ? and capability = ?
+                """, participantId, capability).stream().findFirst()
+                .orElse(Map.of("participant_id", participantId, "capability", capability, "status", "MISSING"));
+    }
+
+    Map<String, Object> reviewState(UUID reviewId) {
+        return jdbcTemplate.queryForMap("select id, status, confidence_weight, suppression_reason from marketplace_reviews where id = ?", reviewId);
+    }
+
+    Map<String, Object> disputeState(UUID disputeId) {
+        return jdbcTemplate.queryForMap("select id, status from marketplace_disputes where id = ?", disputeId);
+    }
+
+    int evidenceRequirementCount(String targetType, UUID targetId) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from evidence_requirements where target_type = ? and target_id = ?
+                """, Integer.class, targetType, targetId);
+        return count == null ? 0 : count;
+    }
+
     UUID manualCase(String targetType, UUID targetId, String openedBy, String reason, UUID queueItemId) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
@@ -148,16 +175,60 @@ public class OpsQueueRepository {
         jdbcTemplate.update("update listing_search_documents set searchable = false, status = 'HIDDEN' where listing_id = ?", id);
     }
 
-    void requestEvidence(UUID targetId) {
+    UUID requestEvidence(String targetType, UUID targetId, String evidenceType, String reason) {
+        UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into evidence_requirements (id, target_type, target_id, evidence_type, required_before_action, reason)
-                values (?, 'LISTING', ?, 'USER_STATEMENT', 'MANUAL_REVIEW', 'Moderator requested evidence')
-                """, UUID.randomUUID(), targetId);
+                values (?, ?, ?, ?, 'MANUAL_REVIEW', ?)
+                """, id, targetType, targetId, evidenceType, reason);
+        return id;
     }
 
     void suppressReview(UUID reviewId, String reason) {
         jdbcTemplate.update("update marketplace_reviews set status = 'SUPPRESSED', confidence_weight = 0, suppression_reason = ? where id = ?",
                 reason, reviewId);
+    }
+
+    void restoreReview(UUID reviewId, String reason) {
+        jdbcTemplate.update("""
+                update marketplace_reviews
+                set status = 'ACTIVE',
+                    confidence_weight = greatest(confidence_weight, 10),
+                    suppression_reason = ?
+                where id = ?
+                """, "Restored: " + reason, reviewId);
+    }
+
+    void restrictCapability(UUID participantId, String capability, String actor, String reason) {
+        jdbcTemplate.update("""
+                insert into participant_capabilities (id, participant_id, capability, status, restricted_by, restrict_reason)
+                values (?, ?, ?, 'RESTRICTED', ?, ?)
+                on conflict (participant_id, capability) do update
+                set status = 'RESTRICTED', restricted_by = excluded.restricted_by,
+                    restrict_reason = excluded.restrict_reason, updated_at = now()
+                """, UUID.randomUUID(), participantId, capability, actor, reason);
+    }
+
+    void restoreCapability(UUID participantId, String capability, String actor, String reason) {
+        jdbcTemplate.update("""
+                update participant_capabilities
+                set status = 'ACTIVE', granted_by = ?, grant_reason = ?, restricted_by = null,
+                    restrict_reason = null, updated_at = now()
+                where participant_id = ? and capability = ?
+                """, actor, reason, participantId, capability);
+    }
+
+    UUID requestVerification(UUID participantId, String actor, String reason) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into participant_restrictions (id, participant_id, restriction_type, status, actor, reason, metadata_json)
+                values (?, ?, 'REQUIRES_VERIFICATION', 'ACTIVE', ?, ?, '{"source":"moderator_action"}'::jsonb)
+                """, id, participantId, actor, reason);
+        return id;
+    }
+
+    void escalateDispute(UUID disputeId) {
+        jdbcTemplate.update("update marketplace_disputes set status = 'ESCALATED', updated_at = now() where id = ?", disputeId);
     }
 
     private OpsQueueItemResponse row(ResultSet rs, int rowNum) throws SQLException {

@@ -35,11 +35,24 @@ public class AccountRestrictionWorkflowController {
     @PostMapping("/api/v1/ops/account-restrictions/restore")
     public Map<String, Object> restore(@RequestBody Map<String, Object> request) {
         UUID participantId = UUID.fromString(required(request, "participantId"));
+        Object restriction = request.get("restrictionId");
+        int updated;
+        if (restriction != null && !restriction.toString().isBlank()) {
+            UUID restrictionId = UUID.fromString(restriction.toString());
+            updated = jdbcTemplate.update("""
+                    update participant_restrictions
+                    set status = 'REMOVED', removed_at = now(), removed_by = ?, remove_reason = ?
+                    where id = ? and participant_id = ? and status = 'ACTIVE'
+                    """, required(request, "actor"), required(request, "reason"), restrictionId, participantId);
+            outboxRepository.insert("PARTICIPANT", participantId, participantId, "ACCOUNT_RESTRICTION_WORKFLOW_UPDATED",
+                    Map.of("action", "restore", "restrictionId", restrictionId, "updated", updated));
+            return Map.of("participantId", participantId, "restrictionId", restrictionId, "updated", updated);
+        }
         jdbcTemplate.update("""
                 update participant_restrictions
                 set status = 'REMOVED', removed_at = now(), removed_by = ?, remove_reason = ?
-                where participant_id = ? and status = 'ACTIVE'
-                """, required(request, "actor"), required(request, "reason"), participantId);
+                where participant_id = ? and restriction_type = ? and status = 'ACTIVE'
+                """, required(request, "actor"), required(request, "reason"), participantId, required(request, "restrictionType"));
         outboxRepository.insert("PARTICIPANT", participantId, participantId, "ACCOUNT_RESTRICTION_WORKFLOW_UPDATED",
                 Map.of("action", "restore"));
         return Map.of("participantId", participantId, "status", "RESTORED");

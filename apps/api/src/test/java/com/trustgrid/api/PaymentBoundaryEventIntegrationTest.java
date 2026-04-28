@@ -15,10 +15,14 @@ class PaymentBoundaryEventIntegrationTest extends Tg101To160IntegrationTestSuppo
         Flow disputed = createDisputableServiceFlow("payment-refund");
         UUID dispute = openDispute(disputed, "payment-dispute-" + suffix());
         post("/api/v1/disputes/" + dispute + "/resolve", Map.of(
-                "outcome", "INSUFFICIENT_EVIDENCE",
+                "outcome", "SAFETY_ESCALATION",
                 "resolvedBy", "moderator@example.com",
                 "reason", "Boundary proof"), null);
         post("/api/v1/transactions/" + disputed.transactionId() + "/payment-boundary/request-refund", actorReason(), null);
+        jdbcTemplate.update("""
+                insert into risk_decisions (id, target_type, target_id, score, risk_level, decision, policy_version)
+                values (?, 'PARTICIPANT', ?, 90, 'HIGH', 'REQUIRE_MANUAL_REVIEW', 'risk_rules_v1')
+                """, UUID.randomUUID(), disputed.providerId());
         post("/api/v1/transactions/" + disputed.transactionId() + "/payment-boundary/request-payout-hold", actorReason(), null);
         assertThat(get("/api/v1/transactions/" + completed.transactionId() + "/payment-boundary").getBody().toString()).contains("RELEASE_REQUESTED");
         assertThat(countRows("select count(*) from payment_boundary_events")).isGreaterThanOrEqualTo(3);

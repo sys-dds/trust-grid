@@ -30,7 +30,8 @@ class FinalCoreInvariantProofIntegrationTest extends Tg101To160IntegrationTestSu
         post("/api/v1/disputes/" + dispute + "/resolve", Map.of(
                 "outcome", "INSUFFICIENT_EVIDENCE", "resolvedBy", "moderator@example.com", "reason", "Allowed outcome"), null);
         post("/api/v1/transactions/" + flow.transactionId() + "/payment-boundary/request-release", actorReason(), null);
-        post("/api/v1/transactions/" + flow.transactionId() + "/payment-boundary/request-refund", actorReason(), null);
+        post("/api/v1/transactions/" + flow.transactionId() + "/payment-boundary/request-refund", Map.of(
+                "actor", "operator@example.com", "reason", "refund recommended after insufficient evidence"), null);
         assertThat(countRows("select count(*) from payment_boundary_events")).isGreaterThanOrEqualTo(2);
 
         Map<?, ?> ranking = get("/api/v1/listings/trust-ranked-search?policyVersion=risk_averse_v1").getBody();

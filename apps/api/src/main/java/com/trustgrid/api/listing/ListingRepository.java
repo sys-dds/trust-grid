@@ -261,7 +261,7 @@ public class ListingRepository {
                 join listing_search_documents sd on sd.listing_id = l.id
                 join participants p on p.id = l.owner_participant_id
                 left join participant_restrictions pr on pr.participant_id = p.id
-                    and pr.status = 'ACTIVE' and pr.restriction_type = 'HIDDEN_FROM_MARKETPLACE_SEARCH'
+                    and pr.status = 'ACTIVE' and pr.restriction_type in ('HIDDEN_FROM_MARKETPLACE_SEARCH', 'LISTING_BLOCKED')
                 where sd.searchable = true and l.status = 'LIVE'
                   and p.account_status not in ('SUSPENDED', 'CLOSED', 'RESTRICTED')
                   and pr.id is null

@@ -17,6 +17,12 @@ class PolicySimulationAppealIntegrationTest extends Tg101To160IntegrationTestSup
                 "policy", Map.of("threshold", 75),
                 "createdBy", "operator@example.com",
                 "reason", "Simulation proof"), null).getBody();
+        post("/api/v1/policies/" + policy.get("policyId") + "/request-approval",
+                Map.of("requestedBy", "operator@example.com", "reason", "Approval required"), null);
+        post("/api/v1/policies/" + policy.get("policyId") + "/approve", Map.of(
+                "approvedBy", "risk-lead@example.com",
+                "reason", "Approved",
+                "riskAcknowledgement", "Deterministic risk policy acknowledged"), null);
         post("/api/v1/policies/" + policy.get("policyId") + "/activate", Map.of(), null);
         assertThat(getList("/api/v1/policies/active").getBody().toString()).contains("strict_v1");
         post("/api/v1/policy-simulations/trust", Map.of("toPolicyVersion", "strict_v1", "requestedBy", "operator@example.com", "reason", "Trust sim"), null);
@@ -27,7 +33,8 @@ class PolicySimulationAppealIntegrationTest extends Tg101To160IntegrationTestSup
                 "targetType", "PARTICIPANT", "targetId", participant.toString(),
                 "appealReason", "Please review", "metadata", Map.of("source", "test")), null).getBody();
         post("/api/v1/appeals/" + appeal.get("appealId") + "/decide", Map.of(
-                "decision", "CAPABILITY_RESTORED", "decidedBy", "moderator@example.com", "reason", "Appeal accepted"), null);
+                "decision", "CAPABILITY_RESTORED", "decidedBy", "moderator@example.com",
+                "reason", "Appeal accepted", "targetCapability", "BUY"), null);
         assertThat(get("/api/v1/data-retention/summary").getBody().get("deletionJob")).isEqualTo(false);
         assertThat(countRows("select count(*) from policy_simulation_runs")).isGreaterThanOrEqualTo(4);
         assertThat(countRows("select count(*) from marketplace_events where event_type = 'APPEAL_DECIDED'")).isPositive();

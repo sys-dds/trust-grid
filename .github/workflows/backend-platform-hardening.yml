@@ -52,6 +52,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=Pr5CarryForwardHardeningIntegrationTest,ReviewGraphAbuseDetectionIntegrationTest,ReviewSuppressionTrustGraphRiskIntegrationTest,MarketplaceOpsQueueIntegrationTest,ModeratorActionAuditIntegrationTest,ManualReviewSafetyEscalationIntegrationTest,PaymentBoundaryEventIntegrationTest,AnalyticsMetricsIntegrationTest,ReplayRebuildConsistencyIntegrationTest,ScamSimulatorScaleBenchmarkIntegrationTest,FailureFallbackIntegrationTest,PolicySimulationAppealIntegrationTest,FinalCoreInvariantProofIntegrationTest,TrustGrid101To160CoreProofE2EIntegrationTest,DockerRuntimeDemoScenarioIntegrationTest" test
 
+      - name: Run policy engine targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=Pr6CarryForwardHardeningIntegrationTest,PolicyEngineLifecycleIntegrationTest,PolicyDslLiteEvaluationIntegrationTest,PolicyExceptionWorkflowIntegrationTest,PolicyBlastRadiusRollbackIntegrationTest,DomainPolicyControlsIntegrationTest,PolicySimulationDataDrivenIntegrationTest,PolicyExplainabilityAuditIntegrationTest,TrustGrid161To180PolicyEngineE2EIntegrationTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api
