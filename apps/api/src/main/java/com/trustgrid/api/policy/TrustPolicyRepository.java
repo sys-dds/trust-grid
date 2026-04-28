@@ -1,6 +1,8 @@
 package com.trustgrid.api.policy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trustgrid.api.shared.ConflictException;
+import com.trustgrid.api.shared.NotFoundException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,7 +37,9 @@ public class TrustPolicyRepository {
     }
 
     Map<String, Object> policy(UUID id) {
-        return jdbcTemplate.queryForMap("select * from trust_policy_versions where id = ?", id);
+        return jdbcTemplate.queryForList("select * from trust_policy_versions where id = ?", id).stream()
+                .findFirst()
+                .orElseThrow(() -> new NotFoundException("Trust policy not found"));
     }
 
     boolean risky(UUID id) {
@@ -61,6 +65,13 @@ public class TrustPolicyRepository {
     }
 
     UUID requestApproval(UUID id, Map<String, Object> request) {
+        requirePolicyExists(id);
+        Integer existing = jdbcTemplate.queryForObject("""
+                select count(*) from policy_approvals where policy_version_id = ? and approval_status = 'REQUIRED'
+                """, Integer.class, id);
+        if (existing != null && existing > 0) {
+            throw new ConflictException("Policy approval request already exists");
+        }
         UUID approvalId = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into policy_approvals (id, policy_version_id, approval_status, requested_by, request_reason)
@@ -70,33 +81,46 @@ public class TrustPolicyRepository {
     }
 
     void approve(UUID id, Map<String, Object> request) {
-        jdbcTemplate.update("""
+        requirePolicyExists(id);
+        int updated = jdbcTemplate.update("""
                 update policy_approvals
                 set approval_status = 'APPROVED', approved_by = ?, approval_reason = ?,
                     risk_acknowledgement = ?, decided_at = now()
                 where policy_version_id = ? and approval_status = 'REQUIRED'
                 """, required(request, "approvedBy"), required(request, "reason"),
                 required(request, "riskAcknowledgement"), id);
+        if (updated == 0) {
+            throw new ConflictException("Policy approval cannot be approved from current state");
+        }
     }
 
     void reject(UUID id, Map<String, Object> request) {
-        jdbcTemplate.update("""
+        requirePolicyExists(id);
+        int updated = jdbcTemplate.update("""
                 update policy_approvals
                 set approval_status = 'REJECTED', approved_by = ?, approval_reason = ?,
                     risk_acknowledgement = ?, decided_at = now()
                 where policy_version_id = ? and approval_status = 'REQUIRED'
                 """, required(request, "approvedBy"), required(request, "reason"),
                 required(request, "riskAcknowledgement"), id);
+        if (updated == 0) {
+            throw new ConflictException("Policy approval cannot be rejected from current state");
+        }
     }
 
     UUID restorePrevious(UUID id) {
+        requirePolicyExists(id);
         Map<String, Object> policy = policy(id);
-        UUID previous = jdbcTemplate.queryForObject("""
+        List<UUID> previousRows = jdbcTemplate.query("""
                 select id from trust_policy_versions
                 where policy_name = ? and status = 'RETIRED' and id <> ?
                 order by retired_at desc nulls last, created_at desc
                 limit 1
-                """, UUID.class, policy.get("policy_name"), id);
+                """, (rs, rowNum) -> rs.getObject("id", UUID.class), policy.get("policy_name"), id);
+        if (previousRows.isEmpty()) {
+            throw new ConflictException("No previous active policy is available for rollback");
+        }
+        UUID previous = previousRows.getFirst();
         jdbcTemplate.update("update trust_policy_versions set status = 'RETIRED', retired_at = now() where id = ?", id);
         jdbcTemplate.update("update trust_policy_versions set status = 'ACTIVE', activated_at = now(), retired_at = null where id = ?", previous);
         return previous;
@@ -200,6 +224,13 @@ public class TrustPolicyRepository {
             return objectMapper.writeValueAsString(value);
         } catch (Exception exception) {
             throw new IllegalArgumentException("Invalid JSON", exception);
+        }
+    }
+
+    private void requirePolicyExists(UUID id) {
+        Integer count = jdbcTemplate.queryForObject("select count(*) from trust_policy_versions where id = ?", Integer.class, id);
+        if (count == null || count == 0) {
+            throw new NotFoundException("Trust policy not found");
         }
     }
 }
