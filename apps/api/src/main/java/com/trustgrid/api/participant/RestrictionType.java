@@ -1,0 +1,11 @@
+package com.trustgrid.api.participant;
+
+public enum RestrictionType {
+    LISTING_BLOCKED,
+    ACCEPTING_BLOCKED,
+    MAX_TRANSACTION_VALUE,
+    REQUIRES_MANUAL_REVIEW,
+    REQUIRES_VERIFICATION,
+    HIDDEN_FROM_MARKETPLACE_SEARCH,
+    REVIEW_WEIGHT_SUPPRESSED
+}

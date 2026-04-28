@@ -46,15 +46,15 @@ class TrustGridSeedFoundationIntegrationTest {
         var firstResponse = restTemplate.postForEntity(url("/api/v1/system/seed/foundation"), null, Map.class);
 
         assertThat(firstResponse.getStatusCode().is2xxSuccessful()).isTrue();
-        assertThat(count("marketplace_participants")).isEqualTo(4);
+        assertThat(count("participants")).isEqualTo(4);
         assertThat(count("trust_profiles")).isEqualTo(4);
         assertThat(count("participant_capabilities")).isEqualTo(6);
-        assertThat(count("marketplace_events")).isGreaterThanOrEqualTo(15);
+        assertThat(count("marketplace_events")).isGreaterThanOrEqualTo(14);
 
         var secondResponse = restTemplate.postForEntity(url("/api/v1/system/seed/foundation"), null, Map.class);
 
         assertThat(secondResponse.getStatusCode().is2xxSuccessful()).isTrue();
-        assertThat(count("marketplace_participants")).isEqualTo(4);
+        assertThat(count("participants")).isEqualTo(4);
         assertThat(distinctProfileSlugs()).isEqualTo(4);
         assertThat(secondResponse.getBody()).containsEntry("participantsCreated", 0);
     }
@@ -64,7 +64,7 @@ class TrustGridSeedFoundationIntegrationTest {
     }
 
     private Integer distinctProfileSlugs() {
-        return jdbcTemplate.queryForObject("select count(distinct profile_slug) from marketplace_participants", Integer.class);
+        return jdbcTemplate.queryForObject("select count(distinct profile_slug) from participants", Integer.class);
     }
 
     private String url(String path) {

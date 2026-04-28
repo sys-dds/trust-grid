@@ -13,8 +13,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class FoundationSeedService {
 
-    private static final UUID SYSTEM_AGGREGATE_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
-
     private final FoundationSeedRepository repository;
     private final boolean endpointEnabled;
 
@@ -43,14 +41,14 @@ public class FoundationSeedService {
             UUID participantId = existingParticipantId.orElseGet(() -> repository.createParticipant(participant));
             if (createdParticipant) {
                 participantsCreated++;
-                repository.createEvent("PARTICIPANT", participantId, "PARTICIPANT_CREATED", "foundation seed participant created");
+                repository.createEvent("PARTICIPANT", participantId, participantId, "PARTICIPANT_CREATED", "foundation seed participant created");
                 eventsCreated++;
             }
 
             if (!repository.trustProfileExists(participantId)) {
                 UUID trustProfileId = repository.createTrustProfile(participantId, participant);
                 trustProfilesCreated++;
-                repository.createEvent("TRUST_PROFILE", trustProfileId, "TRUST_PROFILE_CREATED", "foundation seed trust profile created");
+                repository.createEvent("TRUST_PROFILE", trustProfileId, participantId, "TRUST_PROFILE_INITIALIZED", "foundation seed trust profile created");
                 eventsCreated++;
             }
 
@@ -61,14 +59,11 @@ public class FoundationSeedService {
                     String eventType = "RESTRICTED".equals(capability.status())
                             ? "CAPABILITY_RESTRICTED"
                             : "CAPABILITY_GRANTED";
-                    repository.createEvent("CAPABILITY", capabilityId, eventType, "foundation seed capability created");
+                    repository.createEvent("CAPABILITY", capabilityId, participantId, eventType, "foundation seed capability created");
                     eventsCreated++;
                 }
             }
         }
-
-        repository.createEvent("SYSTEM", SYSTEM_AGGREGATE_ID, "FOUNDATION_SEED_CREATED", "foundation seed request completed");
-        eventsCreated++;
 
         return new FoundationSeedResponse(participantsCreated, trustProfilesCreated, capabilitiesCreated, eventsCreated);
     }

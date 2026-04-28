@@ -1,6 +1,7 @@
 package com.trustgrid.api.seed;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -18,7 +19,7 @@ public class FoundationSeedRepository {
 
     Optional<UUID> findParticipantIdBySlug(String profileSlug) {
         List<UUID> ids = jdbcTemplate.query(
-                "select id from marketplace_participants where profile_slug = ?",
+                "select id from participants where profile_slug = ?",
                 (rs, rowNum) -> rs.getObject("id", UUID.class),
                 profileSlug
         );
@@ -28,17 +29,19 @@ public class FoundationSeedRepository {
     UUID createParticipant(SeedParticipant participant) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-                insert into marketplace_participants (
-                    id, display_name, profile_slug, account_status, verification_status, profile_quality_score
-                ) values (?, ?, ?, ?, ?, ?)
+                insert into participants (
+                    id, display_name, profile_slug, account_status, verification_status, trust_tier, risk_level
+                ) values (?, ?, ?, ?, ?, ?, ?)
                 """,
                 id,
                 participant.displayName(),
                 participant.profileSlug(),
                 participant.accountStatus(),
                 participant.verificationStatus(),
-                BigDecimal.ZERO
+                participant.trustTier(),
+                participant.riskLevel()
         );
+        jdbcTemplate.update("insert into participant_profiles (participant_id) values (?)", id);
         return id;
     }
 
@@ -52,27 +55,21 @@ public class FoundationSeedRepository {
     }
 
     UUID createTrustProfile(UUID participantId, SeedParticipant participant) {
-        UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into trust_profiles (
-                    id, participant_id, trust_tier, risk_level, trust_score, trust_confidence,
-                    max_transaction_value_cents, listing_blocked, accepting_blocked,
-                    requires_manual_review, requires_verification
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    participant_id, trust_tier, risk_level, trust_score, trust_confidence,
+                    max_transaction_value_cents, restriction_flags_json, signals_json
+                ) values (?, ?, ?, ?, ?, ?, cast(? as jsonb), '{}'::jsonb)
                 """,
-                id,
                 participantId,
                 participant.trustTier(),
                 participant.riskLevel(),
-                participant.trustScore(),
-                participant.trustConfidence(),
+                participant.trustScore().multiply(BigDecimal.TEN).setScale(0, RoundingMode.HALF_UP).intValue(),
+                confidenceValue(participant.trustConfidence()),
                 participant.maxTransactionValueCents(),
-                participant.listingBlocked(),
-                participant.acceptingBlocked(),
-                participant.requiresManualReview(),
-                participant.requiresVerification()
+                restrictionFlags(participant)
         );
-        return id;
+        return participantId;
     }
 
     boolean capabilityExists(UUID participantId, String capability) {
@@ -89,31 +86,54 @@ public class FoundationSeedRepository {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into participant_capabilities (
-                    id, participant_id, capability, status, reason
-                ) values (?, ?, ?, ?, ?)
+                    id, participant_id, capability, status, granted_by, grant_reason, restricted_by, restrict_reason
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 id,
                 participantId,
                 capability.capability(),
                 capability.status(),
-                "foundation seed"
+                "trust-grid-api",
+                "foundation seed",
+                "RESTRICTED".equals(capability.status()) ? "trust-grid-api" : null,
+                "RESTRICTED".equals(capability.status()) ? "foundation seed restriction" : null
         );
         return id;
     }
 
-    void createEvent(String aggregateType, UUID aggregateId, String eventType, String reason) {
+    void createEvent(String aggregateType, UUID aggregateId, UUID participantId, String eventType, String reason) {
         jdbcTemplate.update("""
                 insert into marketplace_events (
-                    id, aggregate_type, aggregate_id, event_type, actor, reason
-                ) values (?, ?, ?, ?, ?, ?)
+                    id, aggregate_type, aggregate_id, participant_id, event_key, event_type, payload_json
+                ) values (?, ?, ?, ?, ?, ?, cast(? as jsonb))
                 """,
                 UUID.randomUUID(),
                 aggregateType,
                 aggregateId,
+                participantId,
+                eventType + ":" + aggregateId + ":" + UUID.randomUUID(),
                 eventType,
-                "trust-grid-api",
-                reason
+                "{\"reason\":\"" + reason + "\"}"
         );
+    }
+
+    private int confidenceValue(String confidence) {
+        return switch (confidence) {
+            case "HIGH" -> 100;
+            case "MEDIUM" -> 50;
+            default -> 0;
+        };
+    }
+
+    private String restrictionFlags(SeedParticipant participant) {
+        return """
+                {"listingBlocked":%s,"acceptingBlocked":%s,"requiresManualReview":%s,"requiresVerification":%s}
+                """.formatted(
+                participant.listingBlocked(),
+                participant.acceptingBlocked(),
+                participant.requiresManualReview(),
+                participant.requiresVerification()
+        ).trim();
     }
 
     record SeedParticipant(
