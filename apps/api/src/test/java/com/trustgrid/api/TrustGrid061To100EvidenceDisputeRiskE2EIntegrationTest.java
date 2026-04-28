@@ -50,7 +50,8 @@ class TrustGrid061To100EvidenceDisputeRiskE2EIntegrationTest extends EvidenceDis
                 "reason", "Mixed evidence"
         ), null);
 
-        jdbcTemplate.update("update marketplace_transactions set status = 'COMPLETED', completed_at = now() where id = ?", flow.transactionId());
+        post("/api/v1/transactions/" + flow.transactionId() + "/confirm-completion",
+                action(flow.buyerId()), "e2e-confirm-" + suffix());
         assertThat(post("/api/v1/transactions/" + flow.transactionId() + "/reviews", Map.of(
                 "reviewerParticipantId", flow.buyerId().toString(),
                 "reviewedParticipantId", flow.providerId().toString(),

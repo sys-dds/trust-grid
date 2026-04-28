@@ -122,11 +122,75 @@ public class ReputationRepository {
                 """, UUID.randomUUID(), participantId, previousScore, newScore, previousTier, newTier, reason, json(signals));
     }
 
+    Optional<ReputationSnapshotResponse> latestSnapshot(UUID participantId) {
+        return jdbcTemplate.query("""
+                select participant_id, trust_score, trust_confidence, trust_tier, risk_level, strengths_json,
+                       penalties_json, contributing_signals_json, created_at
+                from reputation_snapshots
+                where participant_id = ?
+                order by created_at desc
+                limit 1
+                """, this::snapshotRow, participantId).stream().findFirst();
+    }
+
+    ReputationSnapshotResponse trustProfileReadModel(UUID participantId) {
+        ParticipantReputationView participant = participant(participantId)
+                .orElseThrow(() -> new com.trustgrid.api.shared.NotFoundException("Participant not found"));
+        return new ReputationSnapshotResponse(participantId, participant.trustScore(), participant.trustConfidence(),
+                participant.trustTier(), participant.riskLevel(), List.of(), List.of(), List.of("trust_profile_read_model"),
+                Map.of("source", "trust_profile", "averageWeight", 0), null);
+    }
+
+    int snapshotCount(UUID participantId) {
+        Integer count = jdbcTemplate.queryForObject("select count(*) from reputation_snapshots where participant_id = ?",
+                Integer.class, participantId);
+        return count == null ? 0 : count;
+    }
+
+    int recalculationEventCount(UUID participantId) {
+        Integer count = jdbcTemplate.queryForObject("select count(*) from reputation_recalculation_events where participant_id = ?",
+                Integer.class, participantId);
+        return count == null ? 0 : count;
+    }
+
+    private ReputationSnapshotResponse snapshotRow(ResultSet rs, int rowNum) throws SQLException {
+        return new ReputationSnapshotResponse(
+                rs.getObject("participant_id", UUID.class),
+                rs.getInt("trust_score"),
+                rs.getInt("trust_confidence"),
+                rs.getString("trust_tier"),
+                rs.getString("risk_level"),
+                readStringList(rs.getString("strengths_json")),
+                readStringList(rs.getString("penalties_json")),
+                List.of("reputation_v1"),
+                readMap(rs.getString("contributing_signals_json")),
+                rs.getTimestamp("created_at").toInstant()
+        );
+    }
+
     private String json(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
         } catch (Exception exception) {
             throw new IllegalArgumentException("Invalid JSON payload", exception);
+        }
+    }
+
+    private List<String> readStringList(String value) {
+        try {
+            return objectMapper.readValue(value, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
+            });
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private Map<String, Object> readMap(String value) {
+        try {
+            return objectMapper.readValue(value, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+            });
+        } catch (Exception exception) {
+            return Map.of();
         }
     }
 

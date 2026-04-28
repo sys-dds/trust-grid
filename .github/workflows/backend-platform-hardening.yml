@@ -47,6 +47,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=TransactionRoleAuthorizationCarryForwardIntegrationTest,TransactionInvariantCarryForwardIntegrationTest,EvidenceMetadataAndRequirementIntegrationTest,DisputeLifecycleEvidenceBundleIntegrationTest,DisputeResolutionTrustImpactIntegrationTest,ReviewReputationEligibilityIntegrationTest,ReputationSnapshotAndTierTransitionIntegrationTest,RiskDecisionRulesIntegrationTest,TrustAwareRankingReplayIntegrationTest,FraudRiskRegressionIntegrationTest,TrustGrid061To100EvidenceDisputeRiskE2EIntegrationTest" test
 
+      - name: Run control plane proof targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=Pr5CarryForwardHardeningIntegrationTest,ReviewGraphAbuseDetectionIntegrationTest,ReviewSuppressionTrustGraphRiskIntegrationTest,MarketplaceOpsQueueIntegrationTest,ModeratorActionAuditIntegrationTest,ManualReviewSafetyEscalationIntegrationTest,PaymentBoundaryEventIntegrationTest,AnalyticsMetricsIntegrationTest,ReplayRebuildConsistencyIntegrationTest,ScamSimulatorScaleBenchmarkIntegrationTest,FailureFallbackIntegrationTest,PolicySimulationAppealIntegrationTest,FinalCoreInvariantProofIntegrationTest,TrustGrid101To160CoreProofE2EIntegrationTest,DockerRuntimeDemoScenarioIntegrationTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api

@@ -51,7 +51,17 @@ public class TrustAwareRankingService {
 
     @Transactional
     public RankingReplayResponse replay(UUID rankingDecisionId) {
-        RankingReplayResponse response = repository.replay(rankingDecisionId);
+        RankingDecisionLogRepository.RankingLogSnapshot snapshot = repository.snapshot(rankingDecisionId);
+        List<RankingListingResponse> replayed = snapshot.candidates().stream()
+                .map(candidate -> score(candidate, snapshot.query(), snapshot.policyVersion()))
+                .sorted(Comparator.comparingLong(RankingListingResponse::score).reversed()
+                        .thenComparing(result -> result.listingId().toString()))
+                .toList();
+        List<UUID> replayedIds = replayed.stream().map(RankingListingResponse::listingId).toList();
+        boolean matched = snapshot.originalResultIds().equals(replayedIds);
+        RankingReplayResponse response = new RankingReplayResponse(snapshot.rankingDecisionId(),
+                snapshot.originalResultIds(), replayedIds, matched, snapshot.policyVersion(),
+                matched ? "recomputed_from_stored_candidate_snapshot" : "stored_snapshot_replay_mismatch");
         outboxRepository.insert("RANKING", rankingDecisionId, null, "RANKING_REPLAYED",
                 Map.of("matched", response.matched(), "policyVersion", response.policyVersion().name()));
         return response;
