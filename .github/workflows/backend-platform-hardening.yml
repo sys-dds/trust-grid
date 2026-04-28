@@ -42,6 +42,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=CategoryAndListingFoundationIntegrationTest,ListingPublishSearchModerationIntegrationTest,ListingDuplicateRiskOutboxIntegrationTest,TransactionCreationAndIdempotencyIntegrationTest,TransactionLifecycleTypesIntegrationTest,TransactionConcurrencyAndRiskGateIntegrationTest,TransactionCancellationNoShowCompletionIntegrationTest,TransactionTimelineInvariantOutboxIntegrationTest,TrustGrid021To060MarketplaceLifecycleE2EIntegrationTest" test
 
+      - name: Run evidence dispute risk targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=TransactionRoleAuthorizationCarryForwardIntegrationTest,TransactionInvariantCarryForwardIntegrationTest,EvidenceMetadataAndRequirementIntegrationTest,DisputeLifecycleEvidenceBundleIntegrationTest,DisputeResolutionTrustImpactIntegrationTest,ReviewReputationEligibilityIntegrationTest,ReputationSnapshotAndTierTransitionIntegrationTest,RiskDecisionRulesIntegrationTest,TrustAwareRankingReplayIntegrationTest,FraudRiskRegressionIntegrationTest,TrustGrid061To100EvidenceDisputeRiskE2EIntegrationTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api

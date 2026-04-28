@@ -1,0 +1,15 @@
+package com.trustgrid.api.dispute;
+
+public enum DisputeStatus {
+    OPEN,
+    AWAITING_BUYER_EVIDENCE,
+    AWAITING_SELLER_EVIDENCE,
+    AWAITING_PROVIDER_EVIDENCE,
+    UNDER_REVIEW,
+    RESOLVED_BUYER,
+    RESOLVED_SELLER,
+    RESOLVED_PROVIDER,
+    SPLIT_DECISION,
+    ESCALATED,
+    CLOSED
+}
