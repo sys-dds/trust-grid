@@ -39,13 +39,47 @@ public class AppealService {
     @Transactional
     public AppealResponse decide(UUID id, DecideAppealRequest request) {
         AppealResponse before = repository.get(id);
+        Map<String, Object> beforeState = Map.of("targetType", before.targetType(), "targetId", before.targetId());
+        Map<String, Object> afterState = Map.of("decision", request.decision());
         repository.decide(id, request);
         if ("CAPABILITY_RESTORED".equals(request.decision())) {
-            repository.restoreCapabilities(before.participantId());
+            String capability = request.targetCapability();
+            UUID participantId = before.participantId();
+            if ("PARTICIPANT_CAPABILITY".equals(before.targetType())) {
+                Map<String, Object> capabilityRow = repository.capabilityById(before.targetId());
+                beforeState = capabilityRow;
+                participantId = (UUID) capabilityRow.get("participant_id");
+                capability = capabilityRow.get("capability").toString();
+            }
+            if (capability == null || capability.isBlank()) {
+                Object metadataCapability = before.metadata().get("capability");
+                if (metadataCapability == null || metadataCapability.toString().isBlank()) {
+                    throw new IllegalArgumentException("targetCapability is required for capability appeal decisions");
+                }
+                capability = metadataCapability.toString();
+            }
+            repository.restoreCapability(participantId, capability, request.decidedBy(), request.reason());
+            afterState = Map.of("participantId", participantId, "capability", capability, "status", "ACTIVE");
         }
         if ("RESTRICTION_REDUCED".equals(request.decision())) {
-            repository.reduceRestrictions(before.participantId());
+            if (!"PARTICIPANT_RESTRICTION".equals(before.targetType())) {
+                throw new IllegalArgumentException("RESTRICTION_REDUCED requires PARTICIPANT_RESTRICTION target");
+            }
+            beforeState = repository.restrictionById(before.targetId());
+            repository.reduceRestriction(before.participantId(), before.targetId(), request.decidedBy(), request.reason());
+            afterState = Map.of("restrictionId", before.targetId(), "status", "REMOVED");
         }
+        if ("EVIDENCE_REQUIRED".equals(request.decision())) {
+            UUID requirementId = repository.createEvidenceRequirement(appealRequirementTarget(before.targetType()),
+                    before.targetId(), request.reason());
+            afterState = Map.of("requirementId", requirementId, "targetType", before.targetType(), "targetId", before.targetId());
+        }
+        if ("PERMANENT_SUSPENSION".equals(request.decision())) {
+            UUID participantId = "PARTICIPANT".equals(before.targetType()) ? before.targetId() : before.participantId();
+            repository.suspendParticipant(participantId, request.decidedBy(), request.reason());
+            afterState = Map.of("participantId", participantId, "accountStatus", "SUSPENDED");
+        }
+        repository.mergeMetadata(id, Map.of("decisionBefore", beforeState, "decisionAfter", afterState));
         outboxRepository.insert("APPEAL", id, before.participantId(), "APPEAL_DECIDED",
                 Map.of("decision", request.decision()));
         return repository.get(id);
@@ -57,5 +91,14 @@ public class AppealService {
 
     public AppealResponse get(UUID id) {
         return repository.get(id);
+    }
+
+    private String appealRequirementTarget(String targetType) {
+        return switch (targetType) {
+            case "LISTING" -> "LISTING";
+            case "DISPUTE" -> "DISPUTE";
+            case "PARTICIPANT", "PARTICIPANT_RESTRICTION", "PARTICIPANT_CAPABILITY" -> "PARTICIPANT";
+            default -> "TRANSACTION";
+        };
     }
 }

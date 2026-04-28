@@ -43,20 +43,52 @@ public class AppealRepository {
                 """, request.decision(), request.decidedBy(), request.reason(), appealId);
     }
 
-    void restoreCapabilities(UUID participantId) {
-        jdbcTemplate.update("""
-                update participant_capabilities
-                set status = 'ACTIVE', updated_at = now(), revoked_by = null, revoke_reason = null, restricted_by = null, restrict_reason = null
-                where participant_id = ?
-                """, participantId);
+    Map<String, Object> capabilityById(UUID capabilityId) {
+        return jdbcTemplate.queryForMap("select id, participant_id, capability, status from participant_capabilities where id = ?", capabilityId);
     }
 
-    void reduceRestrictions(UUID participantId) {
+    Map<String, Object> restrictionById(UUID restrictionId) {
+        return jdbcTemplate.queryForMap("select id, participant_id, restriction_type, status from participant_restrictions where id = ?", restrictionId);
+    }
+
+    void restoreCapability(UUID participantId, String capability, String actor, String reason) {
+        jdbcTemplate.update("""
+                update participant_capabilities
+                set status = 'ACTIVE', updated_at = now(), granted_by = ?, grant_reason = ?,
+                    revoked_by = null, revoke_reason = null, restricted_by = null, restrict_reason = null
+                where participant_id = ? and capability = ?
+                """, actor, reason, participantId, capability);
+    }
+
+    void reduceRestriction(UUID participantId, UUID restrictionId, String actor, String reason) {
         jdbcTemplate.update("""
                 update participant_restrictions
-                set status = 'REMOVED', removed_at = now(), removed_by = 'appeal', remove_reason = 'Appeal reduced restriction'
-                where participant_id = ? and status = 'ACTIVE'
-                """, participantId);
+                set status = 'REMOVED', removed_at = now(), removed_by = ?, remove_reason = ?
+                where id = ? and participant_id = ? and status = 'ACTIVE'
+                """, actor, reason, restrictionId, participantId);
+    }
+
+    UUID createEvidenceRequirement(String targetType, UUID targetId, String reason) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into evidence_requirements (id, target_type, target_id, evidence_type, required_before_action, reason)
+                values (?, ?, ?, 'USER_STATEMENT', 'APPEAL_DECISION', ?)
+                """, id, targetType, targetId, reason);
+        return id;
+    }
+
+    void suspendParticipant(UUID participantId, String actor, String reason) {
+        jdbcTemplate.update("update participants set account_status = 'SUSPENDED', updated_at = now() where id = ?", participantId);
+        jdbcTemplate.update("""
+                insert into participant_status_history (id, participant_id, old_status, new_status, actor, reason, metadata_json)
+                values (?, ?, null, 'SUSPENDED', ?, ?, '{"source":"appeal_decision"}'::jsonb)
+                """, UUID.randomUUID(), participantId, actor, reason);
+    }
+
+    void mergeMetadata(UUID appealId, Map<String, Object> metadata) {
+        jdbcTemplate.update("""
+                update appeals set metadata_json = metadata_json || cast(? as jsonb) where id = ?
+                """, json(metadata), appealId);
     }
 
     AppealResponse get(UUID appealId) {

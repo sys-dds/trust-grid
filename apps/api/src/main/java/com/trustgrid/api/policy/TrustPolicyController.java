@@ -29,6 +29,26 @@ public class TrustPolicyController {
         return policyService.activate(policyId);
     }
 
+    @PostMapping("/api/v1/policies/{policyId}/request-approval")
+    public Map<String, Object> requestApproval(@PathVariable UUID policyId, @RequestBody Map<String, Object> request) {
+        return policyService.requestApproval(policyId, request);
+    }
+
+    @PostMapping("/api/v1/policies/{policyId}/approve")
+    public Map<String, Object> approve(@PathVariable UUID policyId, @RequestBody Map<String, Object> request) {
+        return policyService.approve(policyId, request);
+    }
+
+    @PostMapping("/api/v1/policies/{policyId}/reject")
+    public Map<String, Object> reject(@PathVariable UUID policyId, @RequestBody Map<String, Object> request) {
+        return policyService.reject(policyId, request);
+    }
+
+    @PostMapping("/api/v1/policies/{policyId}/rollback")
+    public Map<String, Object> restorePrevious(@PathVariable UUID policyId, @RequestBody Map<String, Object> request) {
+        return policyService.restorePrevious(policyId, request);
+    }
+
     @PostMapping("/api/v1/policies/{policyId}/retire")
     public Map<String, Object> retire(@PathVariable UUID policyId) {
         return policyService.retire(policyId);
@@ -42,6 +62,16 @@ public class TrustPolicyController {
     @GetMapping("/api/v1/policies/active")
     public List<Map<String, Object>> active() {
         return policyService.active();
+    }
+
+    @PostMapping("/api/v1/policies/blast-radius-preview")
+    public Map<String, Object> blastRadius(@RequestBody Map<String, Object> request) {
+        return policyService.blastRadius(request);
+    }
+
+    @PostMapping("/api/v1/policies/regression-check")
+    public Map<String, Object> regression(@RequestBody Map<String, Object> request) {
+        return policyService.regressionCheck(request);
     }
 
     @PostMapping("/api/v1/policy-simulations/trust")

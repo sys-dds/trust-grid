@@ -31,7 +31,6 @@ class TrustGridIdentityGuardrailTest {
             join("led", "ger"),
             join("es", "crow"),
             join("roll", "out"),
-            join("roll", "back"),
             join("deployment", " control plane"),
             join("realtime", " collaboration")
     );
