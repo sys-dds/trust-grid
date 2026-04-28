@@ -21,3 +21,11 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+### TrustGrid backend local output ###
+apps/api/target/
+.m2/
+local-repo/
+logs/
+*.log
+.testcontainers.properties

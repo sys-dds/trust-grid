@@ -1,0 +1,128 @@
+services:
+  trustgrid-postgres:
+    image: postgres:17-alpine
+    container_name: trustgrid-postgres
+    environment:
+      POSTGRES_DB: ${TRUSTGRID_DB_NAME:-trustgrid}
+      POSTGRES_USER: ${TRUSTGRID_DB_USER:-trustgrid}
+      POSTGRES_PASSWORD: ${TRUSTGRID_DB_PASSWORD:-trustgrid}
+    ports:
+      - "${TRUSTGRID_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRUSTGRID_DB_USER:-trustgrid} -d ${TRUSTGRID_DB_NAME:-trustgrid}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - trustgrid-postgres-data:/var/lib/postgresql/data
+
+  trustgrid-redis:
+    image: redis:7.4-alpine
+    container_name: trustgrid-redis
+    ports:
+      - "${TRUSTGRID_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  trustgrid-kafka:
+    image: apache/kafka:3.9.0
+    container_name: trustgrid-kafka
+    ports:
+      - "${TRUSTGRID_KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@trustgrid-kafka:29093
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://trustgrid-kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  trustgrid-opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: trustgrid-opensearch
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: TrustGrid1!
+    ports:
+      - "${TRUSTGRID_OPENSEARCH_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - trustgrid-opensearch-data:/usr/share/opensearch/data
+
+  trustgrid-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: trustgrid-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${TRUSTGRID_MINIO_ROOT_USER:-trustgrid}
+      MINIO_ROOT_PASSWORD: ${TRUSTGRID_MINIO_ROOT_PASSWORD:-trustgrid_secret}
+    ports:
+      - "${TRUSTGRID_MINIO_PORT:-9000}:9000"
+      - "${TRUSTGRID_MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - trustgrid-minio-data:/data
+
+  trustgrid-api:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+    container_name: trustgrid-api
+    depends_on:
+      trustgrid-postgres:
+        condition: service_healthy
+      trustgrid-redis:
+        condition: service_healthy
+      trustgrid-kafka:
+        condition: service_healthy
+      trustgrid-opensearch:
+        condition: service_healthy
+      trustgrid-minio:
+        condition: service_healthy
+    environment:
+      TRUSTGRID_DB_URL: jdbc:postgresql://trustgrid-postgres:5432/trustgrid
+      TRUSTGRID_DB_USER: trustgrid
+      TRUSTGRID_DB_PASSWORD: trustgrid
+      TRUSTGRID_REDIS_HOST: trustgrid-redis
+      TRUSTGRID_REDIS_PORT: 6379
+      TRUSTGRID_KAFKA_BOOTSTRAP_SERVERS: trustgrid-kafka:29092
+      TRUSTGRID_OPENSEARCH_URL: http://trustgrid-opensearch:9200
+      TRUSTGRID_MINIO_ENDPOINT: http://trustgrid-minio:9000
+      TRUSTGRID_NODE_ID: local-node-1
+      TRUSTGRID_SEED_ENDPOINT_ENABLED: "true"
+    ports:
+      - "${TRUSTGRID_API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health/readiness >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  trustgrid-postgres-data:
+  trustgrid-opensearch-data:
+  trustgrid-minio-data:
