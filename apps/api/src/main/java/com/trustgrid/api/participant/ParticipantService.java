@@ -291,7 +291,7 @@ public class ParticipantService {
                 canUseCapabilities && active.contains(Capability.OFFER_SERVICES),
                 canUseCapabilities && active.contains(Capability.ACCEPT_ERRANDS),
                 canUseCapabilities && active.contains(Capability.ACCEPT_SHOPPING_REQUESTS),
-                !activeRestrictions.contains(RestrictionType.HIDDEN_FROM_MARKETPLACE_SEARCH),
+                canUseCapabilities && !activeRestrictions.contains(RestrictionType.HIDDEN_FROM_MARKETPLACE_SEARCH),
                 activeRestrictions.contains(RestrictionType.REQUIRES_MANUAL_REVIEW),
                 activeRestrictions.contains(RestrictionType.REQUIRES_VERIFICATION)
         );
