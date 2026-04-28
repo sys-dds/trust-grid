@@ -36,4 +36,4 @@ trustgrid:
   opensearch-url: ${TRUSTGRID_OPENSEARCH_URL:http://localhost:9200}
   minio-endpoint: ${TRUSTGRID_MINIO_ENDPOINT:http://localhost:9000}
   seed:
-    endpoint-enabled: ${TRUSTGRID_SEED_ENDPOINT_ENABLED:true}
+    endpoint-enabled: ${TRUSTGRID_SEED_ENDPOINT_ENABLED:false}

@@ -1,12 +1,8 @@
 package com.trustgrid.api.system;
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import java.time.Instant;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -41,16 +37,5 @@ public class SystemController {
     @GetMapping("/dependencies")
     public SystemDependenciesResponse dependencies() {
         return new SystemDependenciesResponse(serviceName, Instant.now(), dependencyProbeService.dependencies());
-    }
-
-    @PostMapping("/validation-probe")
-    public ValidationProbeResponse validationProbe(@Valid @RequestBody ValidationProbeRequest request) {
-        return new ValidationProbeResponse(request.name());
-    }
-
-    public record ValidationProbeRequest(@NotBlank String name) {
-    }
-
-    public record ValidationProbeResponse(String name) {
     }
 }
