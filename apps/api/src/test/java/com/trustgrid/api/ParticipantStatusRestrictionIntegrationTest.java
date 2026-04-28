@@ -72,4 +72,42 @@ class ParticipantStatusRestrictionIntegrationTest extends ParticipantIntegration
         assertThat(countRows("select count(*) from marketplace_events where participant_id = ? and event_type = 'RESTRICTION_APPLIED'", participantId)).isEqualTo(1);
         assertThat(countRows("select count(*) from marketplace_events where participant_id = ? and event_type = 'RESTRICTION_REMOVED'", participantId)).isEqualTo(1);
     }
+
+    @Test
+    void searchEligibilityReflectsSuspendedClosedAndHiddenParticipants() {
+        UUID active = participantId(createParticipant("search-active-helper", "Search Active Helper", "search-active-create"));
+        post("/api/v1/participants/" + active + "/capabilities", Map.of(
+                "capability", "BUY",
+                "actor", "operator@example.com",
+                "reason", "Approved"
+        ), "search-active-buy");
+        assertThat(childMap(get("/api/v1/participants/" + active + "/trust-summary").getBody(), "marketplaceEligibility"))
+                .containsEntry("canAppearInSearch", true);
+
+        UUID suspended = participantId(createParticipant("search-suspended-helper", "Search Suspended Helper", "search-suspended-create"));
+        post("/api/v1/participants/" + suspended + "/account-status", Map.of(
+                "newStatus", "SUSPENDED",
+                "actor", "operator@example.com",
+                "reason", "Safety review"
+        ), "search-suspended-status");
+        assertThat(childMap(get("/api/v1/participants/" + suspended + "/trust-summary").getBody(), "marketplaceEligibility"))
+                .containsEntry("canAppearInSearch", false);
+
+        UUID closed = participantId(createParticipant("search-closed-helper", "Search Closed Helper", "search-closed-create"));
+        post("/api/v1/participants/" + closed + "/account-status", Map.of(
+                "newStatus", "CLOSED",
+                "actor", "operator@example.com",
+                "reason", "Closed"
+        ), "search-closed-status");
+        assertThat(childMap(get("/api/v1/participants/" + closed + "/trust-summary").getBody(), "marketplaceEligibility"))
+                .containsEntry("canAppearInSearch", false);
+
+        post("/api/v1/participants/" + active + "/restrictions", Map.of(
+                "restrictionType", "HIDDEN_FROM_MARKETPLACE_SEARCH",
+                "actor", "operator@example.com",
+                "reason", "Hide profile"
+        ), "search-hidden-restriction");
+        assertThat(childMap(get("/api/v1/participants/" + active + "/trust-summary").getBody(), "marketplaceEligibility"))
+                .containsEntry("canAppearInSearch", false);
+    }
 }
