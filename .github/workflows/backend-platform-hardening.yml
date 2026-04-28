@@ -21,11 +21,26 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Run targeted backend tests
+      - name: Prove Maven Wrapper
         run: |
           cd apps/api
           chmod +x ./mvnw
+          ./mvnw -v
+
+      - name: Run foundation targeted backend tests
+        run: |
+          cd apps/api
           ./mvnw "-Dtest=TrustGridApplicationSmokeIntegrationTest,TrustGridMigrationIntegrationTest,TrustGridErrorContractIntegrationTest,TrustGridSeedFoundationIntegrationTest,TrustGridDependencyProbeIntegrationTest,TrustGridIdentityGuardrailTest" test
+
+      - name: Run participant targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=ParticipantIdentityFlowIntegrationTest,ParticipantProfileCapabilityVerificationIntegrationTest,ParticipantStatusRestrictionIntegrationTest,ParticipantTrustSummaryAndTimelineIntegrationTest,ParticipantAdminSearchIntegrationTest,MarketplaceOutboxAndIdempotencyIntegrationTest,TrustGrid009To020ParticipantIdentityE2EIntegrationTest" test
+
+      - name: Run full backend tests
+        run: |
+          cd apps/api
+          ./mvnw test
 
       - name: Compile backend
         run: |

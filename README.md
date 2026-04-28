@@ -37,4 +37,4 @@ This first slice only bootstraps the backend/runtime foundation. Listings, trans
 
 ## Project boundary
 
-TrustGrid is focused on peer-to-peer marketplace trust and safety. It does not execute payments, implement a financial ledger, implement deployment orchestration, implement live collaboration, or implement social content feeds.
+TrustGrid is focused on peer-to-peer marketplace trust and safety. It does not execute payments, implement financial accounting, implement deployment orchestration, implement live collaboration, or implement social content feeds.
