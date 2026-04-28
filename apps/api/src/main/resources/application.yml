@@ -1,0 +1,39 @@
+spring:
+  application:
+    name: trust-grid-api
+  datasource:
+    url: ${TRUSTGRID_DB_URL:jdbc:postgresql://localhost:5432/trustgrid}
+    username: ${TRUSTGRID_DB_USER:trustgrid}
+    password: ${TRUSTGRID_DB_PASSWORD:trustgrid}
+  flyway:
+    enabled: true
+  data:
+    redis:
+      host: ${TRUSTGRID_REDIS_HOST:localhost}
+      port: ${TRUSTGRID_REDIS_PORT:6379}
+  kafka:
+    bootstrap-servers: ${TRUSTGRID_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    readinessstate:
+      enabled: true
+    livenessstate:
+      enabled: true
+
+trustgrid:
+  service-name: trust-grid-api
+  node-id: ${TRUSTGRID_NODE_ID:local-node-1}
+  opensearch-url: ${TRUSTGRID_OPENSEARCH_URL:http://localhost:9200}
+  minio-endpoint: ${TRUSTGRID_MINIO_ENDPOINT:http://localhost:9000}
+  seed:
+    endpoint-enabled: ${TRUSTGRID_SEED_ENDPOINT_ENABLED:true}

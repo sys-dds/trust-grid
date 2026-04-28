@@ -1,0 +1,36 @@
+name: TrustGrid Backend Platform Hardening
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  backend-platform-hardening:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run targeted backend tests
+        run: |
+          cd apps/api
+          chmod +x ./mvnw
+          ./mvnw "-Dtest=TrustGridApplicationSmokeIntegrationTest,TrustGridMigrationIntegrationTest,TrustGridErrorContractIntegrationTest,TrustGridSeedFoundationIntegrationTest,TrustGridDependencyProbeIntegrationTest,TrustGridIdentityGuardrailTest" test
+
+      - name: Compile backend
+        run: |
+          cd apps/api
+          ./mvnw -DskipTests compile
+
+      - name: Validate Docker Compose config
+        run: docker compose -f infra/docker-compose/docker-compose.yml config
