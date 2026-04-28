@@ -25,6 +25,8 @@ public class PolicyEngineService {
 
     @Transactional
     public PolicyRuleResponse createRule(CreatePolicyRuleRequest request) {
+        evaluator.validateAction(request.action() == null ? Map.of() : request.action());
+        evaluator.validateConditions(request.condition() == null ? Map.of() : request.condition());
         UUID id = repository.createRule(request);
         outboxRepository.insert("POLICY", id, null, "POLICY_RULE_CREATED", Map.of("ruleKey", request.ruleKey()));
         return repository.rules(request.policyName(), request.policyVersion(), null).stream()
@@ -63,8 +65,12 @@ public class PolicyEngineService {
             }
         }
 
-        List<UUID> exceptionIds = repository.activeExceptionIds(request.policyName(), request.policyVersion(),
-                request.targetType(), request.targetId());
+        String originalDecision = decision;
+        List<Map<String, Object>> appliedExceptions = compatibleExceptions(request, matched, originalDecision);
+        List<Map<String, Object>> ignoredExceptions = ignoredExceptions(request, matched, originalDecision);
+        List<UUID> exceptionIds = appliedExceptions.stream()
+                .map(exception -> (UUID) exception.get("exceptionId"))
+                .toList();
         if (!exceptionIds.isEmpty() && isBlocking(decision)) {
             decision = "ALLOW_WITH_LIMITS";
         }
@@ -73,7 +79,8 @@ public class PolicyEngineService {
         Map<String, Object> explanation = Map.of(
                 "inputSnapshot", input,
                 "matchedRules", matched,
-                "appliedExceptions", exceptionIds,
+                "appliedExceptions", appliedExceptions,
+                "ignoredExceptions", ignoredExceptions,
                 "recommendedNextSteps", nextSteps,
                 "deterministicRulesVersion", "deterministic_rules_v1",
                 "explanation", matched.isEmpty()
@@ -106,6 +113,63 @@ public class PolicyEngineService {
         return List.of("REQUIRE_EXTRA_EVIDENCE", "REQUIRE_VERIFICATION", "REQUIRE_MANUAL_REVIEW",
                 "HIDE_LISTING", "BLOCK_TRANSACTION", "RESTRICT_CAPABILITY", "SUSPEND_ACCOUNT",
                 "SUPPRESS_REVIEW_WEIGHT").contains(decision);
+    }
+
+    private List<Map<String, Object>> compatibleExceptions(EvaluatePolicyRequest request,
+                                                           List<Map<String, Object>> matchedRules,
+                                                           String decision) {
+        if (!isBlocking(decision) || matchedRules.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> firstRule = matchedRules.getFirst();
+        return repository.activeExceptions(request.policyName(), request.policyVersion(), request.targetType(), request.targetId())
+                .stream()
+                .filter(exception -> compatible(exception.exceptionType(), decision,
+                        String.valueOf(firstRule.get("ruleType")), String.valueOf(firstRule.get("ruleKey")), firstRule))
+                .map(exception -> Map.<String, Object>of(
+                        "exceptionId", exception.id(),
+                        "exceptionType", exception.exceptionType(),
+                        "compatibilityReason", "Exception type matches blocked action and rule category"
+                ))
+                .toList();
+    }
+
+    private List<Map<String, Object>> ignoredExceptions(EvaluatePolicyRequest request,
+                                                        List<Map<String, Object>> matchedRules,
+                                                        String decision) {
+        if (!isBlocking(decision) || matchedRules.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> firstRule = matchedRules.getFirst();
+        return repository.activeExceptions(request.policyName(), request.policyVersion(), request.targetType(), request.targetId())
+                .stream()
+                .filter(exception -> !compatible(exception.exceptionType(), decision,
+                        String.valueOf(firstRule.get("ruleType")), String.valueOf(firstRule.get("ruleKey")), firstRule))
+                .map(exception -> Map.<String, Object>of(
+                        "exceptionId", exception.id(),
+                        "exceptionType", exception.exceptionType(),
+                        "ignoredReason", "Exception type is not compatible with this blocked action"
+                ))
+                .toList();
+    }
+
+    private boolean compatible(String exceptionType, String decision, String ruleType, String ruleKey,
+                               Map<String, Object> matchedRule) {
+        String key = ruleKey.toLowerCase();
+        return switch (exceptionType) {
+            case "ALLOW_HIGH_VALUE" -> List.of("BLOCK_TRANSACTION", "REQUIRE_MANUAL_REVIEW", "REQUIRE_VERIFICATION").contains(decision)
+                    && (key.contains("value") || key.contains("high"));
+            case "ALLOW_NEW_USER_ACTION" -> List.of("BLOCK_TRANSACTION", "REQUIRE_MANUAL_REVIEW").contains(decision)
+                    && (key.contains("new") || key.contains("limited") || key.contains("ramp"));
+            case "BYPASS_EXTRA_EVIDENCE" -> "REQUIRE_EXTRA_EVIDENCE".equals(decision);
+            case "TEMPORARY_RANKING_VISIBILITY" -> "RANKING_RULE".equals(ruleType)
+                    && ("HIDE_LISTING".equals(decision) || key.contains("visibility") || key.contains("suppression"));
+            case "DISPUTE_POLICY_OVERRIDE" -> "DISPUTE_RULE".equals(ruleType)
+                    && List.of("REQUIRE_EXTRA_EVIDENCE", "REQUIRE_MANUAL_REVIEW").contains(decision);
+            case "REVIEW_WEIGHT_OVERRIDE" -> "REVIEW_WEIGHT_RULE".equals(ruleType)
+                    && "SUPPRESS_REVIEW_WEIGHT".equals(decision);
+            default -> false;
+        };
     }
 
     private List<String> nextSteps(String decision, List<UUID> exceptionIds) {

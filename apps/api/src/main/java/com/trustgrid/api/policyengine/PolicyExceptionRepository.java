@@ -1,5 +1,7 @@
 package com.trustgrid.api.policyengine;
 
+import com.trustgrid.api.shared.ConflictException;
+import com.trustgrid.api.shared.NotFoundException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -29,35 +31,49 @@ public class PolicyExceptionRepository {
     }
 
     void approve(UUID id, Map<String, Object> request) {
-        jdbcTemplate.update("""
+        requireExists(id);
+        int updated = jdbcTemplate.update("""
                 update policy_exceptions
                 set status = 'ACTIVE', approved_by = ?, approval_reason = ?,
                     risk_acknowledgement = ?, approved_at = now()
                 where id = ? and status = 'REQUESTED'
                 """, required(request, "approvedBy"), required(request, "reason"),
                 required(request, "riskAcknowledgement"), id);
+        if (updated == 0) {
+            throw new ConflictException("Policy exception cannot be approved from current state");
+        }
     }
 
     void reject(UUID id, Map<String, Object> request) {
-        jdbcTemplate.update("""
+        requireExists(id);
+        int updated = jdbcTemplate.update("""
                 update policy_exceptions
                 set status = 'REJECTED', approved_by = ?, approval_reason = ?,
                     risk_acknowledgement = ?, approved_at = now()
                 where id = ? and status = 'REQUESTED'
                 """, required(request, "approvedBy"), required(request, "reason"),
                 required(request, "riskAcknowledgement"), id);
+        if (updated == 0) {
+            throw new ConflictException("Policy exception cannot be rejected from current state");
+        }
     }
 
     void revoke(UUID id, Map<String, Object> request) {
-        jdbcTemplate.update("""
+        requireExists(id);
+        int updated = jdbcTemplate.update("""
                 update policy_exceptions
                 set status = 'REVOKED', approved_by = ?, approval_reason = ?, revoked_at = now()
                 where id = ? and status in ('ACTIVE', 'APPROVED')
                 """, required(request, "actor"), required(request, "reason"), id);
+        if (updated == 0) {
+            throw new ConflictException("Policy exception cannot be revoked from current state");
+        }
     }
 
     Map<String, Object> get(UUID id) {
-        return jdbcTemplate.queryForMap("select * from policy_exceptions where id = ?", id);
+        return jdbcTemplate.queryForList("select * from policy_exceptions where id = ?", id).stream()
+                .findFirst()
+                .orElseThrow(() -> new NotFoundException("Policy exception not found"));
     }
 
     List<Map<String, Object>> list(String status) {
@@ -73,5 +89,12 @@ public class PolicyExceptionRepository {
             throw new IllegalArgumentException(field + " is required");
         }
         return value.toString();
+    }
+
+    private void requireExists(UUID id) {
+        Integer count = jdbcTemplate.queryForObject("select count(*) from policy_exceptions where id = ?", Integer.class, id);
+        if (count == null || count == 0) {
+            throw new NotFoundException("Policy exception not found");
+        }
     }
 }

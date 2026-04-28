@@ -57,6 +57,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=Pr6CarryForwardHardeningIntegrationTest,PolicyEngineLifecycleIntegrationTest,PolicyDslLiteEvaluationIntegrationTest,PolicyExceptionWorkflowIntegrationTest,PolicyBlastRadiusRollbackIntegrationTest,DomainPolicyControlsIntegrationTest,PolicySimulationDataDrivenIntegrationTest,PolicyExplainabilityAuditIntegrationTest,TrustGrid161To180PolicyEngineE2EIntegrationTest" test
 
+      - name: Run operational trust control plane targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=Pr7CarryForwardHardeningIntegrationTest,TrustTelemetryAndSloMonitorIntegrationTest,TrustIncidentLifecycleIntegrationTest,InternalAlertOpsDashboardIntegrationTest,IncidentReplayIntegrationTest,TrustScoreLineageExplanationIntegrationTest,RankingPolicyLineageIntegrationTest,DataConsistencyVerifierIntegrationTest,LineageRebuildRepairIntegrationTest,TrustGrid181To220OperationalControlPlaneE2EIntegrationTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api

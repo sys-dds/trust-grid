@@ -75,7 +75,7 @@ public class PolicyRuleRepository {
         return jdbcTemplate.query(sql.toString(), this::ruleRow, args.toArray());
     }
 
-    List<PolicyRuleResponse> evaluationRules(String policyName, String policyVersion, String targetType) {
+    public List<PolicyRuleResponse> evaluationRules(String policyName, String policyVersion, String targetType) {
         return jdbcTemplate.query("""
                 select r.* from trust_policy_rules r
                 join trust_policy_versions p on p.id = r.policy_version_id
@@ -86,7 +86,19 @@ public class PolicyRuleRepository {
                 """, this::ruleRow, policyName, policyVersion, targetType);
     }
 
-    Map<String, Object> targetSnapshot(String targetType, UUID targetId) {
+    public List<UUID> sampleTargetIds(String targetType, int limit) {
+        String sql = switch (targetType) {
+            case "PARTICIPANT" -> "select id from participants order by created_at desc limit ?";
+            case "LISTING" -> "select id from marketplace_listings order by created_at desc limit ?";
+            case "TRANSACTION" -> "select id from marketplace_transactions order by created_at desc limit ?";
+            case "DISPUTE" -> "select id from marketplace_disputes order by opened_at desc limit ?";
+            case "REVIEW" -> "select id from marketplace_reviews order by created_at desc limit ?";
+            default -> "select id from participants order by created_at desc limit ?";
+        };
+        return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getObject("id", UUID.class), limit);
+    }
+
+    public Map<String, Object> targetSnapshot(String targetType, UUID targetId) {
         return switch (targetType) {
             case "PARTICIPANT" -> jdbcTemplate.queryForMap("""
                     select id as "targetId", trust_tier as "trustTier", verification_status as "verificationStatus",
@@ -126,15 +138,18 @@ public class PolicyRuleRepository {
         };
     }
 
-    List<UUID> activeExceptionIds(String policyName, String policyVersion, String targetType, UUID targetId) {
+    List<PolicyExceptionCandidate> activeExceptions(String policyName, String policyVersion, String targetType, UUID targetId) {
         expireOldExceptions();
         return jdbcTemplate.query("""
-                select id from policy_exceptions
+                select id, exception_type from policy_exceptions
                 where policy_name = ? and policy_version = ?
                   and target_type = ? and target_id = ?
                   and status = 'ACTIVE' and expires_at > now()
                 order by created_at asc
-                """, (rs, rowNum) -> rs.getObject("id", UUID.class), policyName, policyVersion, targetType, targetId);
+                """, (rs, rowNum) -> new PolicyExceptionCandidate(
+                        rs.getObject("id", UUID.class),
+                        rs.getString("exception_type")
+                ), policyName, policyVersion, targetType, targetId);
     }
 
     void expireOldExceptions() {
@@ -193,6 +208,9 @@ public class PolicyRuleRepository {
         } catch (Exception exception) {
             throw new IllegalArgumentException("Invalid JSON payload", exception);
         }
+    }
+
+    record PolicyExceptionCandidate(UUID id, String exceptionType) {
     }
 
     private Map<String, Object> readMap(String value) {
