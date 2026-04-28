@@ -4,6 +4,7 @@ import com.trustgrid.api.category.ListingType;
 import com.trustgrid.api.idempotency.IdempotencyService;
 import com.trustgrid.api.participant.ParticipantAccountStatus;
 import com.trustgrid.api.participant.VerificationStatus;
+import com.trustgrid.api.risk.RiskDecision;
 import com.trustgrid.api.shared.ConflictException;
 import com.trustgrid.api.shared.MarketplaceActionForbiddenException;
 import com.trustgrid.api.shared.NotFoundException;
@@ -23,12 +24,15 @@ public class TransactionService {
     private final TransactionRepository repository;
     private final IdempotencyService idempotencyService;
     private final TransactionInvariantVerifier invariantVerifier;
+    private final TransactionActorAuthorizationService actorAuthorizationService;
 
     public TransactionService(TransactionRepository repository, IdempotencyService idempotencyService,
-                              TransactionInvariantVerifier invariantVerifier) {
+                              TransactionInvariantVerifier invariantVerifier,
+                              TransactionActorAuthorizationService actorAuthorizationService) {
         this.repository = repository;
         this.idempotencyService = idempotencyService;
         this.invariantVerifier = invariantVerifier;
+        this.actorAuthorizationService = actorAuthorizationService;
     }
 
     @Transactional
@@ -52,7 +56,8 @@ public class TransactionService {
                     List<String> rules = validateRisk(listing, requesterId, providerId, value);
                     UUID transactionId = repository.insertTransaction(listing, type, requesterId, providerId, value,
                             idempotencyKey, request.metadata() == null ? Map.of() : request.metadata(), initialStatus(type));
-                    repository.insertRiskSnapshot(transactionId, listingId, requesterId, providerId, rules.isEmpty() ? "ALLOW" : "ALLOW_WITH_LIMITS", rules);
+                    repository.insertRiskSnapshot(transactionId, listingId, requesterId, providerId,
+                            rules.isEmpty() ? RiskDecision.ALLOW.name() : RiskDecision.ALLOW_WITH_LIMITS.name(), rules);
                     repository.timeline(transactionId, "TRANSACTION_CREATED", requesterId, request.actor(), request.reason(), Map.of("listingId", listingId));
                     repository.timeline(transactionId, "TRANSACTION_ACCEPTED", providerId, request.actor(), request.reason(), Map.of("transactionType", type.name()));
                     repository.insertEvent(transactionId, requesterId, "TRANSACTION_CREATED", Map.of("listingId", listingId, "transactionType", type.name()));
@@ -206,6 +211,7 @@ public class TransactionService {
         return idempotencyService.run("transaction:" + action + ":" + transactionId, idempotencyKey, Map.of("transactionId", transactionId), request,
                 "TRANSACTION", this::get, () -> {
                     TransactionResponse tx = get(transactionId);
+                    actorAuthorizationService.authorize(action, tx, actorParticipantId);
                     TransactionStatus next = mutation.next(tx);
                     if (terminal(tx.status())) {
                         throw new ConflictException("Terminal transaction cannot be mutated");

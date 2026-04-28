@@ -213,6 +213,51 @@ public class TransactionRepository {
         return count == null ? 0 : count;
     }
 
+    int marketplaceEventCount(UUID transactionId, String eventType) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from marketplace_events
+                where aggregate_type = 'TRANSACTION' and aggregate_id = ? and event_type = ?
+                """, Integer.class, transactionId, eventType);
+        return count == null ? 0 : count;
+    }
+
+    int riskSnapshotCount(UUID transactionId) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from transaction_risk_snapshots
+                where transaction_id = ?
+                """, Integer.class, transactionId);
+        return count == null ? 0 : count;
+    }
+
+    boolean listingExists(UUID listingId) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*) from marketplace_listings where id = ?
+                """, Integer.class, listingId);
+        return count != null && count > 0;
+    }
+
+    Optional<ListingTransactionState> listingState(UUID listingId) {
+        return jdbcTemplate.query("""
+                select id, status, single_accept from marketplace_listings where id = ?
+                """, (rs, rowNum) -> new ListingTransactionState(
+                rs.getObject("id", UUID.class),
+                rs.getString("status"),
+                rs.getBoolean("single_accept")
+        ), listingId).stream().findFirst();
+    }
+
+    int activeTransactionsForSingleAcceptListing(UUID listingId) {
+        Integer count = jdbcTemplate.queryForObject("""
+                select count(*)
+                from marketplace_transactions t
+                join marketplace_listings l on l.id = t.listing_id
+                where t.listing_id = ?
+                  and l.single_accept = true
+                  and t.status not in ('COMPLETED', 'CANCELLED', 'DISPUTED', 'NO_SHOW_REPORTED')
+                """, Integer.class, listingId);
+        return count == null ? 0 : count;
+    }
+
     private ListingTransactionView listingViewRow(ResultSet rs, int rowNum) throws SQLException {
         return new ListingTransactionView(
                 rs.getObject("id", UUID.class),
@@ -299,5 +344,8 @@ public class TransactionRepository {
             String trustTier,
             long maxTransactionValueCents
     ) {
+    }
+
+    record ListingTransactionState(UUID listingId, String status, boolean singleAccept) {
     }
 }
