@@ -26,6 +26,10 @@ class ReputationSnapshotAndTierTransitionIntegrationTest extends EvidenceDispute
                 "actor", "operator@example.com",
                 "reason", "Trust status test"
         ), "reputation-suspend-" + suffix());
+        post("/api/v1/participants/" + flow.providerId() + "/reputation/recalculate", Map.of(
+                "actor", "system",
+                "reason", "Trust status test recalculation"
+        ), "reputation-recalculate-suspended-" + suffix());
         assertThat(get("/api/v1/participants/" + flow.providerId() + "/reputation").getBody().get("trustTier")).isEqualTo("SUSPENDED");
     }
 }

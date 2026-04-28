@@ -20,6 +20,8 @@ public class RankingDecisionLogRepository {
     };
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
+    private static final TypeReference<List<Map<String, Object>>> MAP_LIST = new TypeReference<>() {
+    };
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -93,30 +95,44 @@ public class RankingDecisionLogRepository {
             scores.put(result.listingId().toString(), result.score());
             reasons.put(result.listingId().toString(), result.reasons());
         }
+        List<Map<String, Object>> snapshot = candidates.stream()
+                .map(candidate -> Map.<String, Object>ofEntries(
+                        Map.entry("listingId", candidate.listingId().toString()),
+                        Map.entry("ownerParticipantId", candidate.ownerParticipantId().toString()),
+                        Map.entry("listingType", candidate.listingType()),
+                        Map.entry("categoryCode", candidate.categoryCode()),
+                        Map.entry("title", candidate.title()),
+                        Map.entry("locationMode", candidate.locationMode()),
+                        Map.entry("amountCents", candidate.amountCents()),
+                        Map.entry("trustScore", candidate.trustScore()),
+                        Map.entry("trustConfidence", candidate.trustConfidence()),
+                        Map.entry("trustTier", candidate.trustTier()),
+                        Map.entry("verificationStatus", candidate.verificationStatus())
+                )).toList();
         jdbcTemplate.update("""
                 insert into ranking_decision_logs (
                     id, query_text, filters_json, policy_version, candidate_ids_json, result_ids_json,
                     scores_json, reasons_json, trust_risk_snapshot_json
                 ) values (?, ?, cast(? as jsonb), ?, cast(? as jsonb), cast(? as jsonb), cast(? as jsonb), cast(? as jsonb), cast(? as jsonb))
                 """, id, query, json(filters), policyVersion.name(), json(candidateIds), json(resultIds),
-                json(scores), json(reasons), json(Map.of("candidateCount", candidates.size())));
+                json(scores), json(reasons), json(Map.of("candidateCount", candidates.size(), "candidates", snapshot)));
         return id;
     }
 
-    RankingReplayResponse replay(UUID rankingDecisionId) {
+    RankingLogSnapshot snapshot(UUID rankingDecisionId) {
         return jdbcTemplate.queryForObject("""
-                select id, policy_version, result_ids_json, reasons_json
+                select id, query_text, policy_version, result_ids_json, trust_risk_snapshot_json
                 from ranking_decision_logs where id = ?
                 """, (rs, rowNum) -> {
             List<UUID> ids = readStringList(rs.getString("result_ids_json")).stream().map(UUID::fromString).toList();
-            return new RankingReplayResponse(
-                    rs.getObject("id", UUID.class),
-                    ids,
-                    ids,
-                    true,
-                    RankingPolicyVersion.valueOf(rs.getString("policy_version")),
-                    "replayed_from_stored_snapshot"
-            );
+            Map<String, Object> stored = readMap(rs.getString("trust_risk_snapshot_json"));
+            Object rawCandidates = stored.get("candidates");
+            List<Map<String, Object>> candidates = rawCandidates == null
+                    ? List.of()
+                    : readMapList(json(rawCandidates));
+            return new RankingLogSnapshot(rs.getObject("id", UUID.class), rs.getString("query_text"),
+                    RankingPolicyVersion.valueOf(rs.getString("policy_version")), ids,
+                    candidates.stream().map(this::candidateFromMap).toList());
         }, rankingDecisionId);
     }
 
@@ -152,8 +168,44 @@ public class RankingDecisionLogRepository {
         }
     }
 
+    Map<String, Object> readMap(String value) {
+        try {
+            return objectMapper.readValue(value, MAP_TYPE);
+        } catch (Exception exception) {
+            return Map.of();
+        }
+    }
+
+    List<Map<String, Object>> readMapList(String value) {
+        try {
+            return objectMapper.readValue(value, MAP_LIST);
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private RankingCandidate candidateFromMap(Map<String, Object> value) {
+        return new RankingCandidate(
+                UUID.fromString((String) value.get("listingId")),
+                UUID.fromString((String) value.get("ownerParticipantId")),
+                (String) value.get("listingType"),
+                (String) value.get("categoryCode"),
+                (String) value.get("title"),
+                (String) value.get("locationMode"),
+                ((Number) value.get("amountCents")).longValue(),
+                ((Number) value.get("trustScore")).intValue(),
+                ((Number) value.get("trustConfidence")).intValue(),
+                (String) value.get("trustTier"),
+                (String) value.get("verificationStatus")
+        );
+    }
+
     public record RankingCandidate(UUID listingId, UUID ownerParticipantId, String listingType, String categoryCode,
                                    String title, String locationMode, long amountCents, int trustScore,
                                    int trustConfidence, String trustTier, String verificationStatus) {
+    }
+
+    public record RankingLogSnapshot(UUID rankingDecisionId, String query, RankingPolicyVersion policyVersion,
+                                     List<UUID> originalResultIds, List<RankingCandidate> candidates) {
     }
 }

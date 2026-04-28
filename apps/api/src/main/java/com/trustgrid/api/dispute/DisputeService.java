@@ -52,11 +52,13 @@ public class DisputeService {
                     UUID disputeId = repository.insertDispute(transactionId, request);
                     evidenceService.createRequirement(EvidenceTargetType.DISPUTE, disputeId, EvidenceType.USER_STATEMENT,
                             "RESOLVE_DISPUTE", "Dispute statement required", request.openedByParticipantId());
-                    UUID deadlineId = repository.createDeadline(disputeId, "BUYER");
+                    List<UUID> deadlineIds = roleAwareDeadlines(tx, request.disputeType()).stream()
+                            .map(role -> repository.createDeadline(disputeId, role))
+                            .toList();
                     outboxRepository.insert("DISPUTE", disputeId, request.openedByParticipantId(), "DISPUTE_OPENED",
                             Map.of("transactionId", transactionId, "disputeType", request.disputeType().name()));
-                    outboxRepository.insert("DISPUTE", disputeId, request.openedByParticipantId(), "DISPUTE_EVIDENCE_DEADLINE_CREATED",
-                            Map.of("deadlineId", deadlineId));
+                    deadlineIds.forEach(deadlineId -> outboxRepository.insert("DISPUTE", disputeId, request.openedByParticipantId(),
+                            "DISPUTE_EVIDENCE_DEADLINE_CREATED", Map.of("deadlineId", deadlineId)));
                     return disputeId;
                 });
     }
@@ -178,6 +180,34 @@ public class DisputeService {
             case SPLIT_DECISION -> DisputeStatus.SPLIT_DECISION;
             case FRAUD_SUSPECTED, SAFETY_ESCALATION -> DisputeStatus.ESCALATED;
             case INSUFFICIENT_EVIDENCE -> DisputeStatus.CLOSED;
+        };
+    }
+
+    private List<String> roleAwareDeadlines(DisputeRepository.TransactionDisputeView tx, DisputeType disputeType) {
+        return switch (tx.transactionType()) {
+            case "SERVICE_BOOKING" -> switch (disputeType) {
+                case SERVICE_NOT_DELIVERED -> List.of("PROVIDER", "BUYER");
+                case NO_SHOW -> List.of("REPORTED_SIDE", "REPORTER");
+                case OFF_PLATFORM_PAYMENT_ATTEMPT, SAFETY_CONCERN -> List.of("REPORTER", "REPORTED_PARTICIPANT", "MODERATOR_REVIEW");
+                default -> List.of("BUYER", "PROVIDER");
+            };
+            case "ITEM_PURCHASE" -> switch (disputeType) {
+                case ITEM_NOT_RECEIVED -> List.of("SELLER", "BUYER");
+                case ITEM_NOT_AS_DESCRIBED, COUNTERFEIT_SUSPECTED -> List.of("BUYER", "SELLER");
+                case OFF_PLATFORM_PAYMENT_ATTEMPT, SAFETY_CONCERN -> List.of("REPORTER", "REPORTED_PARTICIPANT", "MODERATOR_REVIEW");
+                default -> List.of("BUYER", "SELLER");
+            };
+            case "ERRAND" -> switch (disputeType) {
+                case NO_SHOW, SERVICE_NOT_DELIVERED -> List.of("REQUESTER", "PROVIDER");
+                case OFF_PLATFORM_PAYMENT_ATTEMPT, SAFETY_CONCERN -> List.of("REPORTER", "REPORTED_PARTICIPANT", "MODERATOR_REVIEW");
+                default -> List.of("REQUESTER", "PROVIDER");
+            };
+            case "SHOPPING_REQUEST" -> switch (disputeType) {
+                case WRONG_ITEM_PURCHASED, SHOPPER_DID_NOT_BUY -> List.of("SHOPPER", "BUYER");
+                case OFF_PLATFORM_PAYMENT_ATTEMPT, SAFETY_CONCERN -> List.of("REPORTER", "REPORTED_PARTICIPANT", "MODERATOR_REVIEW");
+                default -> List.of("SHOPPER", "BUYER");
+            };
+            default -> List.of("REPORTER", "REPORTED_PARTICIPANT");
         };
     }
 }

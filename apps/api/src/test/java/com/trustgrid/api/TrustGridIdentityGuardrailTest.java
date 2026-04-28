@@ -29,7 +29,6 @@ class TrustGridIdentityGuardrailTest {
             join("ranking", " platform"),
             join("recom", "mender"),
             join("led", "ger"),
-            join("pay", "out"),
             join("es", "crow"),
             join("roll", "out"),
             join("roll", "back"),

@@ -83,6 +83,21 @@ public class ReputationService {
     }
 
     public ReputationSnapshotResponse get(UUID participantId) {
-        return recalculate(participantId, "Snapshot requested");
+        repository.participant(participantId).orElseThrow(() -> new NotFoundException("Participant not found"));
+        return repository.latestSnapshot(participantId)
+                .orElseGet(() -> repository.trustProfileReadModel(participantId));
+    }
+
+    @Transactional
+    public ReputationSnapshotResponse recalculate(UUID participantId, RecalculateReputationRequest request) {
+        return recalculate(participantId, request.reason());
+    }
+
+    public int snapshotCount(UUID participantId) {
+        return repository.snapshotCount(participantId);
+    }
+
+    public int recalculationEventCount(UUID participantId) {
+        return repository.recalculationEventCount(participantId);
     }
 }
