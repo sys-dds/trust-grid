@@ -85,7 +85,7 @@ TrustGrid intentionally does **not** implement:
 * real payment movement
 * balances
 * settlement
-* escrow
+* fund-holding execution
 * real refunds
 * real payouts
 * real bank/provider integrations
@@ -1627,7 +1627,7 @@ TrustGrid owns marketplace trust and safety.
 
 It does not own:
 
-* URL or redirect infrastructure
+* URL-routing or link-serving infrastructure
 * financial execution or accounting truth
 * recommendation-platform experimentation as the primary product
 * realtime collaborative editing/state convergence
