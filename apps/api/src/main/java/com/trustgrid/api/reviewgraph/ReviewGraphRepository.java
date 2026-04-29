@@ -115,7 +115,7 @@ public class ReviewGraphRepository {
     List<ReviewAbuseClusterResponse> clustersForParticipant(UUID participantId) {
         return jdbcTemplate.query("""
                 select * from review_abuse_clusters
-                where member_participant_ids_json ? ?
+                where member_participant_ids_json ?? ?
                 order by created_at desc
                 """, this::clusterRow, participantId.toString());
     }

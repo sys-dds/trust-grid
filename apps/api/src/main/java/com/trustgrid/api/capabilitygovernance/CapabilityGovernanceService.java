@@ -209,11 +209,12 @@ public class CapabilityGovernanceService {
         inputSnapshot.put("valueCents", valueCents);
         temporaryGrant.ifPresent(grant -> inputSnapshot.put("appliedGrantId", grant.get("id")));
         breakGlass.ifPresent(override -> inputSnapshot.put("appliedBreakGlassId", override.get("id")));
+        inputSnapshot.put("policySnapshot", policy);
         UUID decisionId = null;
         if (recordDecision) {
             decisionId = repository.insertDecision(participantId, actionName, targetType, targetId, decision,
                     policy.get("policy_name").toString(), policy.get("policy_version").toString(),
-                    denyReasons, nextSteps, inputSnapshot);
+                    denyReasons, nextSteps, inputSnapshot, policy);
             repository.timeline(participantId, actionName, targetType, targetId, "CAPABILITY_SIMULATED",
                     request.getOrDefault("actor", "operator@example.com").toString(),
                     request.getOrDefault("reason", "Capability simulation").toString(),
@@ -247,9 +248,11 @@ public class CapabilityGovernanceService {
 
     private Map<String, Object> evaluateSnapshot(Map<String, Object> request, Map<String, Object> snapshot) {
         String actionName = repository.required(request, "actionName");
-        Map<String, Object> policy = repository.policyFor(actionName, string(request.get("policyName")),
-                        string(request.get("policyVersion")))
-                .orElseGet(() -> defaultPolicy(actionName));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> snapshotPolicy = (Map<String, Object>) snapshot.get("policySnapshot");
+        Map<String, Object> policy = snapshotPolicy != null ? snapshotPolicy
+                : repository.policyFor(actionName, string(request.get("policyName")),
+                        string(request.get("policyVersion"))).orElseGet(() -> defaultPolicy(actionName));
         @SuppressWarnings("unchecked")
         Map<String, Object> participantSnapshot = (Map<String, Object>) snapshot.getOrDefault("participant", Map.of());
         Map<String, Object> participant = new LinkedHashMap<>();
