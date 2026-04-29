@@ -37,6 +37,26 @@ public class CapabilityGovernanceController {
         return service.simulate(request);
     }
 
+    @PostMapping("/api/v1/capability-governance/replay/{decisionId}")
+    public Map<String, Object> replay(@PathVariable UUID decisionId) {
+        return service.replay(decisionId);
+    }
+
+    @PostMapping("/api/v1/capability-governance/blast-radius-preview")
+    public Map<String, Object> blastRadiusPreview(@RequestBody Map<String, Object> request) {
+        return service.blastRadiusPreview(request);
+    }
+
+    @GetMapping("/api/v1/capability-governance/audit-bundle/participants/{participantId}")
+    public Map<String, Object> auditBundle(@PathVariable UUID participantId) {
+        return service.auditBundle(participantId);
+    }
+
+    @GetMapping("/api/v1/capability-governance/dashboard")
+    public Map<String, Object> dashboard() {
+        return service.dashboard();
+    }
+
     @PostMapping("/api/v1/capability-governance/temporary-grants")
     public Map<String, Object> createTemporaryGrant(@RequestBody Map<String, Object> request) {
         return service.createTemporaryGrant(request);

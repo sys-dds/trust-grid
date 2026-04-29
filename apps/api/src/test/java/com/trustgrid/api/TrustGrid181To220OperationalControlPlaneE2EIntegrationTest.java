@@ -40,6 +40,12 @@ class TrustGrid181To220OperationalControlPlaneE2EIntegrationTest extends Tg181To
                 "windowMinutes", 60,
                 "severity", "HIGH"
         ), null);
+        for (int i = 0; i < 10; i++) {
+            jdbcTemplate.update("""
+                    insert into risk_decisions (id, target_type, target_id, score, risk_level, decision, policy_version)
+                    values (?, 'PARTICIPANT', ?, 90, 'HIGH', 'BLOCK_TRANSACTION', 'deterministic_rules_v1')
+                    """, UUID.randomUUID(), flow.providerId());
+        }
         post("/api/v1/trust-monitors/run", Map.of("requestedBy", "operator@example.com",
                 "reason", "Operational E2E monitor", "windowMinutes", 60), null);
         UUID incident = firstIdFromList("/api/v1/trust-incidents", "id");

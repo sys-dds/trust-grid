@@ -29,7 +29,7 @@ class FullDockerDemoScenarioIntegrationTest extends Tg221To240IntegrationTestSup
                 200000L, null, itemDetails(true));
         publish(service);
         publish(item);
-        assertThat(get("/api/v1/listings/trust-ranked-search?query=Demo&policyVersion=TRUST_BALANCED_V1")
+        assertThat(get("/api/v1/listings/trust-ranked-search?query=Demo&policyVersion=trust_balanced_v1")
                 .getStatusCode().is2xxSuccessful()).isTrue();
 
         Flow flow = createCompletedServiceFlowBetween(normal, trusted, "docker-demo");
@@ -83,6 +83,6 @@ class FullDockerDemoScenarioIntegrationTest extends Tg221To240IntegrationTestSup
 
         post("/api/v1/lineage/rebuild/full", operator(), null);
         post("/api/v1/consistency/checks/full", operator(), null);
-        assertThat(get("/api/v1/consistency/findings").getStatusCode().is2xxSuccessful()).isTrue();
+        assertThat(getList("/api/v1/consistency/findings").getStatusCode().is2xxSuccessful()).isTrue();
     }
 }

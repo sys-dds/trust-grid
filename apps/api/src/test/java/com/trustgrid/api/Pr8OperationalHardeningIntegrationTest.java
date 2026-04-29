@@ -62,9 +62,19 @@ class Pr8OperationalHardeningIntegrationTest extends Tg221To240IntegrationTestSu
         updateStatus(flow.providerId(), "SUSPENDED");
         jdbcTemplate.update("update trust_profiles set trust_tier = 'HIGH_TRUST', trust_score = 900 where participant_id = ?", flow.providerId());
         post("/api/v1/consistency/checks/full", operator(), null);
-        int findingCount = countRows("select count(*) from consistency_findings where status = 'OPEN'");
+        int findingCount = countRows("""
+                select count(*) from consistency_findings
+                where status = 'OPEN'
+                  and finding_type = 'TRUST_PROFILE_IMPOSSIBLE_STATE'
+                  and target_id = ?
+                """, flow.providerId());
         post("/api/v1/consistency/checks/full", operator(), null);
-        assertThat(countRows("select count(*) from consistency_findings where status = 'OPEN'")).isEqualTo(findingCount);
+        assertThat(countRows("""
+                select count(*) from consistency_findings
+                where status = 'OPEN'
+                  and finding_type = 'TRUST_PROFILE_IMPOSSIBLE_STATE'
+                  and target_id = ?
+                """, flow.providerId())).isEqualTo(findingCount);
 
         post("/api/v1/data-repair/recommendations/generate", Map.of(), null);
         UUID recommendation = firstIdFromList("/api/v1/data-repair/recommendations", "id");

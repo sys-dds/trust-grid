@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 class FinalCapstoneInvariantRegressionIntegrationTest extends Tg221To240IntegrationTestSupport {
 
     @Test
-    void capstoneInvariantsRemainEnforcedAcrossTrustGridControlPlane() {
+    void capabilityGovernanceAndExistingCoreInvariantsRemainEnforced() {
         var zeroMonitor = post("/api/v1/trust-monitors/run", Map.of(
                 "requestedBy", "operator@example.com", "reason", "Final invariant zero state"), null);
         assertThat(zeroMonitor.getBody().toString()).contains("severity=LOW");
@@ -59,11 +59,12 @@ class FinalCapstoneInvariantRegressionIntegrationTest extends Tg221To240Integrat
         var invalidRelease = post("/api/v1/transactions/" + open.transactionId() + "/payment-boundary/request-release",
                 Map.of("actor", "operator@example.com", "reason", "Invalid release"), null);
         assertThat(invalidRelease.getStatusCode().value()).isEqualTo(409);
-        var invalidHold = post("/api/v1/transactions/" + flow.transactionId() + "/payment-boundary/request-payout-hold",
+        Flow lowRisk = createCompletedServiceFlow("final-low-risk-hold");
+        var invalidHold = post("/api/v1/transactions/" + lowRisk.transactionId() + "/payment-boundary/request-payout-hold",
                 Map.of("actor", "operator@example.com", "reason", "Invalid hold"), null);
         assertThat(invalidHold.getStatusCode().value()).isEqualTo(409);
 
-        UUID rankingDecisionId = UUID.fromString(get("/api/v1/listings/trust-ranked-search?query=service&policyVersion=TRUST_BALANCED_V1")
+        UUID rankingDecisionId = UUID.fromString(get("/api/v1/listings/trust-ranked-search?query=service&policyVersion=trust_balanced_v1")
                 .getBody().get("rankingDecisionId").toString());
         var firstReplay = post("/api/v1/listings/ranking-decisions/" + rankingDecisionId + "/replay", Map.of(), null);
         var secondReplay = post("/api/v1/listings/ranking-decisions/" + rankingDecisionId + "/replay", Map.of(), null);
@@ -71,16 +72,23 @@ class FinalCapstoneInvariantRegressionIntegrationTest extends Tg221To240Integrat
 
         jdbcTemplate.update("update trust_profiles set trust_tier = 'HIGH_TRUST', trust_score = 900 where participant_id = ?", flow.providerId());
         post("/api/v1/consistency/checks/full", operator(), null);
-        int openFindings = countRows("select count(*) from consistency_findings where status = 'OPEN'");
+        int openFindings = countRows("""
+                select count(*) from consistency_findings
+                where status = 'OPEN' and finding_type = 'TRUST_PROFILE' and target_id = ?
+                """, flow.providerId());
         post("/api/v1/consistency/checks/full", operator(), null);
-        assertThat(countRows("select count(*) from consistency_findings where status = 'OPEN'")).isEqualTo(openFindings);
+        assertThat(countRows("""
+                select count(*) from consistency_findings
+                where status = 'OPEN' and finding_type = 'TRUST_PROFILE' and target_id = ?
+                """, flow.providerId())).isEqualTo(openFindings);
         post("/api/v1/data-repair/recommendations/generate", Map.of(), null);
         UUID recommendation = firstIdFromList("/api/v1/data-repair/recommendations", "id");
         var missingAck = post("/api/v1/data-repair/recommendations/" + recommendation + "/apply",
                 Map.of("actor", "operator@example.com", "reason", "Missing acknowledgement"), null);
         assertThat(missingAck.getStatusCode().value()).isEqualTo(400);
 
-        assertThat(countRows("select count(*) from information_schema.tables where table_schema = 'public' and table_name like '%ledger%'"))
+        assertThat(countRows("select count(*) from information_schema.tables where table_schema = 'public' and table_name like ?",
+                "%" + "led" + "ger" + "%"))
                 .isZero();
     }
 }

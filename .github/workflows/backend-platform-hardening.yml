@@ -65,7 +65,7 @@ jobs:
       - name: Run final capability governance targeted backend tests
         run: |
           cd apps/api
-          ./mvnw "-Dtest=Pr8OperationalHardeningIntegrationTest,CapabilityGovernancePolicyIntegrationTest,CapabilitySimulationIntegrationTest,TemporaryCapabilityGrantIntegrationTest,BreakGlassGovernanceIntegrationTest,CapabilityAccessRegressionIntegrationTest,FinalCapstoneInvariantRegressionIntegrationTest,FinalCapstonePerformanceProofIntegrationTest,FullDockerDemoScenarioIntegrationTest,FinalDocumentationPackagingSmokeTest" test
+          ./mvnw "-Dtest=Pr8OperationalHardeningIntegrationTest,CapabilityGovernancePolicyIntegrationTest,CapabilitySimulationIntegrationTest,TemporaryCapabilityGrantIntegrationTest,BreakGlassGovernanceIntegrationTest,CapabilityAccessRegressionIntegrationTest,CapabilityReplayBlastRadiusAuditIntegrationTest,CapabilityGovernanceConsistencyRepairIntegrationTest,FinalCapstoneInvariantRegressionIntegrationTest,FullDockerDemoScenarioIntegrationTest" test
 
       - name: Run full backend tests
         run: |

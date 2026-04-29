@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 class FinalCapstonePerformanceProofIntegrationTest extends Tg221To240IntegrationTestSupport {
 
     @Test
-    void seededLocalPortfolioScaleOperationsReturnDeterministicMeasurementSummary() {
+    void seededCapabilityGovernanceOperationsReturnDeterministicMeasurementSummary() {
         createCapabilityPolicy("PUBLISH_LISTING", Map.of());
         UUID participantForSimulation = null;
         for (int i = 0; i < 60; i++) {
@@ -31,7 +31,7 @@ class FinalCapstonePerformanceProofIntegrationTest extends Tg221To240Integration
             }
         }
         Map<String, Long> timings = new LinkedHashMap<>();
-        timings.put("trustSearchMs", timed(() -> get("/api/v1/listings/trust-ranked-search?query=Perf&policyVersion=TRUST_BALANCED_V1")));
+        timings.put("trustSearchMs", timed(() -> get("/api/v1/listings/trust-ranked-search?query=Perf&policyVersion=trust_balanced_v1")));
         timings.put("policySimulationMs", timed(() -> post("/api/v1/policy-simulations/shadow-risk", Map.of(
                 "policyName", "risk_policy",
                 "requestedBy", "operator@example.com",

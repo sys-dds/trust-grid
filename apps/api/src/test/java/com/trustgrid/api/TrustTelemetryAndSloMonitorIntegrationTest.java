@@ -3,6 +3,7 @@ package com.trustgrid.api;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class TrustTelemetryAndSloMonitorIntegrationTest extends Tg181To220IntegrationTestSupport {
@@ -31,6 +32,13 @@ class TrustTelemetryAndSloMonitorIntegrationTest extends Tg181To220IntegrationTe
         assertThat(slo.getStatusCode().is2xxSuccessful()).isTrue();
         assertThat(post("/api/v1/trust-slos/evaluate", Map.of(), null).getBody().toString()).contains("breaches");
 
+        UUID participant = createCapableParticipant("telemetry-risk-" + suffix(), "Telemetry Risk", "BUY");
+        for (int i = 0; i < 10; i++) {
+            jdbcTemplate.update("""
+                    insert into risk_decisions (id, target_type, target_id, score, risk_level, decision, policy_version)
+                    values (?, 'PARTICIPANT', ?, 90, 'HIGH', 'BLOCK_TRANSACTION', 'deterministic_rules_v1')
+                    """, UUID.randomUUID(), participant);
+        }
         var monitors = post("/api/v1/trust-monitors/run", Map.of(
                 "requestedBy", "operator@example.com",
                 "reason", "Manual trust monitor run",

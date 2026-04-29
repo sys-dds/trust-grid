@@ -114,7 +114,7 @@ public class TrustIncidentRepository {
             bundle.put("riskDecisions", jdbcTemplate.queryForList("""
                     select * from risk_decisions
                     where risk_level in ('HIGH','CRITICAL')
-                      and created_at between ? - interval '2 hours' and ? + interval '2 hours'
+                      and created_at between (cast(? as timestamptz) - interval '2 hours') and (cast(? as timestamptz) + interval '2 hours')
                     order by created_at desc limit 50
                     """, createdAt, createdAt));
             includedSources.add(Map.of("source", "riskDecisions", "reason", "Risk-spike incident type"));
@@ -138,7 +138,7 @@ public class TrustIncidentRepository {
         if ("PAYMENT_BOUNDARY_ANOMALY".equals(incidentType)) {
             bundle.put("paymentBoundaryEvents", jdbcTemplate.queryForList("""
                     select * from payment_boundary_events
-                    where created_at between ? - interval '2 hours' and ? + interval '2 hours'
+                    where created_at between (cast(? as timestamptz) - interval '2 hours') and (cast(? as timestamptz) + interval '2 hours')
                     order by created_at desc limit 50
                     """, createdAt, createdAt));
             includedSources.add(Map.of("source", "paymentBoundaryEvents", "reason", "Payment-boundary incident type"));
@@ -208,7 +208,7 @@ public class TrustIncidentRepository {
         return jdbcTemplate.queryForList("""
                 select * from trust_telemetry_events
                 where telemetry_type = ?
-                  and created_at between ? - interval '2 hours' and ? + interval '2 hours'
+                  and created_at between (cast(? as timestamptz) - interval '2 hours') and (cast(? as timestamptz) + interval '2 hours')
                 order by created_at desc limit 50
                 """, telemetryType, createdAt, createdAt);
     }
@@ -219,7 +219,7 @@ public class TrustIncidentRepository {
         }
         return jdbcTemplate.queryForList("""
                 select * from moderator_actions
-                where created_at between ? - interval '2 hours' and ? + interval '2 hours'
+                where created_at between (cast(? as timestamptz) - interval '2 hours') and (cast(? as timestamptz) + interval '2 hours')
                 order by created_at desc limit 50
                 """, createdAt, createdAt);
     }
