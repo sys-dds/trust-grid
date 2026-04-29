@@ -138,17 +138,55 @@ public class TrustTelemetryRepository {
     }
 
     private void insertImpact(UUID incidentId) {
+        Map<String, Object> incident = jdbcTemplate.queryForMap("select incident_type from trust_incidents where id = ?", incidentId);
+        Map<String, Object> impact = impactSummary(incident.get("incident_type").toString());
         jdbcTemplate.update("""
                 insert into trust_incident_impacts (
                     id, incident_id, users_affected, listings_hidden, transactions_blocked, disputes_involved, reviews_suppressed, metadata_json
                 ) values (?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
-                """, UUID.randomUUID(), incidentId,
-                count("select count(*) from participants where risk_level in ('HIGH','CRITICAL') or account_status in ('RESTRICTED','SUSPENDED')"),
-                count("select count(*) from marketplace_listings where status in ('HIDDEN','REJECTED','EXPIRED')"),
-                count("select count(*) from risk_decisions where decision = 'BLOCK_TRANSACTION'"),
-                count("select count(*) from marketplace_disputes where status in ('OPEN','UNDER_REVIEW','ESCALATED')"),
-                count("select count(*) from marketplace_reviews where status in ('SUPPRESSED','FRAUD_CONFIRMED_SUPPRESSED')"),
-                json(Map.of("computedFrom", "deterministic_current_state")));
+                """, UUID.randomUUID(), incidentId, impact.get("users_affected"), impact.get("listings_hidden"),
+                impact.get("transactions_blocked"), impact.get("disputes_involved"), impact.get("reviews_suppressed"),
+                json(Map.of("computedFrom", "deterministic_source_records", "incidentType", incident.get("incident_type"))));
+    }
+
+    private Map<String, Object> impactSummary(String incidentType) {
+        return switch (incidentType) {
+            case "RISK_SPIKE" -> Map.of(
+                    "users_affected", count("select count(distinct target_id) from risk_decisions where target_type = 'PARTICIPANT' and risk_level in ('HIGH','CRITICAL')"),
+                    "listings_hidden", count("select count(*) from marketplace_listings where status = 'HIDDEN'"),
+                    "transactions_blocked", count("select count(*) from risk_decisions where decision = 'BLOCK_TRANSACTION'"),
+                    "disputes_involved", 0,
+                    "reviews_suppressed", 0
+            );
+            case "REVIEW_ABUSE_CAMPAIGN" -> Map.of(
+                    "users_affected", count("select count(distinct reviewed_participant_id) from marketplace_reviews where status like '%SUPPRESSED%'"),
+                    "listings_hidden", 0,
+                    "transactions_blocked", 0,
+                    "disputes_involved", 0,
+                    "reviews_suppressed", count("select count(*) from marketplace_reviews where status like '%SUPPRESSED%'")
+            );
+            case "DISPUTE_BACKLOG", "SAFETY_ESCALATION_CLUSTER", "EVIDENCE_BACKLOG" -> Map.of(
+                    "users_affected", count("select count(distinct opened_by_participant_id) from marketplace_disputes where status in ('OPEN','UNDER_REVIEW','ESCALATED')"),
+                    "listings_hidden", 0,
+                    "transactions_blocked", 0,
+                    "disputes_involved", count("select count(*) from marketplace_disputes where status in ('OPEN','UNDER_REVIEW','ESCALATED')"),
+                    "reviews_suppressed", 0
+            );
+            case "SEARCH_SUPPRESSION_ANOMALY" -> Map.of(
+                    "users_affected", count("select count(distinct owner_participant_id) from listing_search_documents where searchable = false"),
+                    "listings_hidden", count("select count(*) from listing_search_documents where searchable = false"),
+                    "transactions_blocked", 0,
+                    "disputes_involved", 0,
+                    "reviews_suppressed", 0
+            );
+            default -> Map.of(
+                    "users_affected", count("select count(*) from participants where risk_level in ('HIGH','CRITICAL') or account_status in ('RESTRICTED','SUSPENDED')"),
+                    "listings_hidden", count("select count(*) from marketplace_listings where status in ('HIDDEN','REJECTED','EXPIRED')"),
+                    "transactions_blocked", count("select count(*) from risk_decisions where decision = 'BLOCK_TRANSACTION'"),
+                    "disputes_involved", count("select count(*) from marketplace_disputes where status in ('OPEN','UNDER_REVIEW','ESCALATED')"),
+                    "reviews_suppressed", count("select count(*) from marketplace_reviews where status like '%SUPPRESSED%'")
+            );
+        };
     }
 
     private String incidentType(String telemetryType) {

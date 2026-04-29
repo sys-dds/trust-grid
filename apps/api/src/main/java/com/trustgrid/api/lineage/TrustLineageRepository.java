@@ -45,7 +45,6 @@ public class TrustLineageRepository {
     }
 
     int rebuildTrustScoreLineage() {
-        jdbcTemplate.update("delete from trust_score_lineage_entries");
         int count = 0;
         count += jdbcTemplate.update("""
                 insert into trust_score_lineage_entries (
@@ -57,6 +56,11 @@ public class TrustLineageRepository {
                        case when status like '%SUPPRESSED%' then 0 else confidence_weight end,
                        'reputation_policy_v1', 'Review contribution to trust score'
                 from marketplace_reviews
+                on conflict (participant_id, source_type, source_id, policy_version) do update set
+                    reputation_snapshot_id = excluded.reputation_snapshot_id,
+                    contribution_type = excluded.contribution_type,
+                    contribution_value = excluded.contribution_value,
+                    explanation = excluded.explanation
                 """);
         count += jdbcTemplate.update("""
                 insert into trust_score_lineage_entries (
@@ -66,6 +70,11 @@ public class TrustLineageRepository {
                 select gen_random_uuid(), opened_by_participant_id, null, 'DISPUTE', id, 'NEGATIVE', -25,
                        'dispute_policy_v1', 'Dispute contribution to trust score'
                 from marketplace_disputes
+                on conflict (participant_id, source_type, source_id, policy_version) do update set
+                    reputation_snapshot_id = excluded.reputation_snapshot_id,
+                    contribution_type = excluded.contribution_type,
+                    contribution_value = excluded.contribution_value,
+                    explanation = excluded.explanation
                 """);
         count += jdbcTemplate.update("""
                 insert into trust_score_lineage_entries (
@@ -76,6 +85,11 @@ public class TrustLineageRepository {
                        policy_version, 'Risk decision contribution to trust score'
                 from risk_decisions
                 where target_type = 'PARTICIPANT'
+                on conflict (participant_id, source_type, source_id, policy_version) do update set
+                    reputation_snapshot_id = excluded.reputation_snapshot_id,
+                    contribution_type = excluded.contribution_type,
+                    contribution_value = excluded.contribution_value,
+                    explanation = excluded.explanation
                 """);
         count += jdbcTemplate.update("""
                 insert into trust_score_lineage_entries (
@@ -85,12 +99,16 @@ public class TrustLineageRepository {
                 select gen_random_uuid(), participant_id, null, 'PROFILE_QUALITY', participant_id, 'NEUTRAL', trust_score,
                        'reputation_policy_v1', 'Current profile quality and score baseline'
                 from trust_profiles
+                on conflict (participant_id, source_type, source_id, policy_version) do update set
+                    reputation_snapshot_id = excluded.reputation_snapshot_id,
+                    contribution_type = excluded.contribution_type,
+                    contribution_value = excluded.contribution_value,
+                    explanation = excluded.explanation
                 """);
         return count;
     }
 
     int rebuildRankingLineage() {
-        jdbcTemplate.update("delete from ranking_lineage_entries");
         return jdbcTemplate.update("""
                 insert into ranking_lineage_entries (
                     id, ranking_decision_id, listing_id, participant_id, policy_version, score, reasons_json, suppression_reason
@@ -101,17 +119,24 @@ public class TrustLineageRepository {
                        case when l.status <> 'LIVE' then l.status else null end
                 from ranking_decision_logs r
                 join marketplace_listings l on r.candidate_ids_json ? l.id::text
+                on conflict (ranking_decision_id, listing_id, policy_version) do update set
+                    participant_id = excluded.participant_id,
+                    score = excluded.score,
+                    reasons_json = excluded.reasons_json,
+                    suppression_reason = excluded.suppression_reason
                 """);
     }
 
     int rebuildPolicyLineage() {
-        jdbcTemplate.update("delete from policy_lineage_entries");
         return jdbcTemplate.update("""
                 insert into policy_lineage_entries (
                     id, decision_type, decision_id, policy_name, policy_version, matched_rules_json, exception_ids_json
                 )
                 select gen_random_uuid(), target_type, id, policy_name, policy_version, matched_rules_json, exception_ids_json
                 from policy_decision_logs
+                on conflict (decision_type, decision_id, policy_name, policy_version) do update set
+                    matched_rules_json = excluded.matched_rules_json,
+                    exception_ids_json = excluded.exception_ids_json
                 """);
     }
 
