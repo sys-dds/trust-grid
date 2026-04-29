@@ -59,4 +59,5 @@ public class ConsistencyController {
     public List<Map<String, Object>> runs() {
         return service.runs();
     }
+
 }

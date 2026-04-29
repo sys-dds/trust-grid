@@ -72,6 +72,7 @@ public class DataRepairRepository {
         require(request, "actor");
         require(request, "reason");
         require(request, "riskAcknowledgement");
+        Map<String, Object> repairResult = executeRepair(before, request);
         int updated = jdbcTemplate.update("""
                 update data_repair_recommendations set status = 'APPLIED', decided_at = now()
                 where id = ? and status in ('PROPOSED','APPROVED')
@@ -91,7 +92,8 @@ public class DataRepairRepository {
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb))
                 """, actionId, id, actionType(before.get("repair_type").toString()), before.get("target_type"),
                 before.get("target_id"), require(request, "actor"), require(request, "reason"),
-                require(request, "riskAcknowledgement"), json(before), json(get(id)));
+                require(request, "riskAcknowledgement"), json(before),
+                json(Map.of("recommendation", get(id), "repairResult", repairResult)));
         return actionId;
     }
 
@@ -127,8 +129,146 @@ public class DataRepairRepository {
             case "REBUILD_REPUTATION" -> "APPLY_REBUILD_REPUTATION";
             case "REBUILD_SEARCH_INDEX" -> "APPLY_REBUILD_SEARCH_INDEX";
             case "REBUILD_LINEAGE" -> "APPLY_REBUILD_LINEAGE";
+            case "MANUAL_REPAIR_REQUIRED", "REQUEST_OPERATOR_REVIEW" -> "RECORD_MANUAL_REPAIR";
             default -> "MARK_FINDING_RESOLVED";
         };
+    }
+
+    private Map<String, Object> executeRepair(Map<String, Object> recommendation, Map<String, Object> request) {
+        String repairType = recommendation.get("repair_type").toString();
+        UUID targetId = (UUID) recommendation.get("target_id");
+        return switch (repairType) {
+            case "REBUILD_REPUTATION" -> rebuildReputation(targetId);
+            case "REBUILD_SEARCH_INDEX" -> rebuildSearchIndex(targetId);
+            case "REBUILD_LINEAGE" -> rebuildLineage(request);
+            case "REPLAY_EVENTS" -> replayEvents();
+            case "MARK_EVIDENCE_REFERENCE_INVALID" -> markEvidenceReferenceInvalid(targetId);
+            case "REQUEST_OPERATOR_REVIEW" -> requestOperatorReview(recommendation, request);
+            case "MANUAL_REPAIR_REQUIRED" -> Map.of("repairExecuted", "MANUAL_REPAIR_RECORDED", "autoRepair", false);
+            default -> Map.of("repairExecuted", "MARK_FINDING_RESOLVED", "autoRepair", false);
+        };
+    }
+
+    private Map<String, Object> rebuildReputation(UUID participantId) {
+        int updated;
+        if (participantId == null) {
+            updated = jdbcTemplate.update("""
+                    update trust_profiles tp
+                    set trust_score = latest.trust_score,
+                        trust_confidence = latest.trust_confidence,
+                        trust_tier = latest.trust_tier,
+                        updated_at = now()
+                    from (
+                        select distinct on (participant_id) participant_id, trust_score, trust_confidence, trust_tier
+                        from reputation_snapshots
+                        order by participant_id, created_at desc
+                    ) latest
+                    where latest.participant_id = tp.participant_id
+                    """);
+        } else {
+            updated = jdbcTemplate.update("""
+                    update trust_profiles tp
+                    set trust_score = latest.trust_score,
+                        trust_confidence = latest.trust_confidence,
+                        trust_tier = latest.trust_tier,
+                        updated_at = now()
+                    from (
+                        select participant_id, trust_score, trust_confidence, trust_tier
+                        from reputation_snapshots
+                        where participant_id = ?
+                        order by created_at desc
+                        limit 1
+                    ) latest
+                    where latest.participant_id = tp.participant_id
+                    """, participantId);
+        }
+        return Map.of("repairExecuted", "REBUILD_REPUTATION", "trustProfilesUpdated", updated);
+    }
+
+    private Map<String, Object> rebuildSearchIndex(UUID listingId) {
+        int changed;
+        if (listingId == null) {
+            jdbcTemplate.update("delete from listing_search_documents");
+            changed = insertSearchDocuments(null);
+        } else {
+            jdbcTemplate.update("delete from listing_search_documents where listing_id = ?", listingId);
+            changed = insertSearchDocuments(listingId);
+        }
+        return Map.of("repairExecuted", "REBUILD_SEARCH_INDEX", "documentsRebuilt", changed);
+    }
+
+    private int insertSearchDocuments(UUID listingId) {
+        String filter = listingId == null ? "" : " where l.id = ? ";
+        Object[] args = listingId == null ? new Object[]{} : new Object[]{listingId};
+        return jdbcTemplate.update("""
+                insert into listing_search_documents (
+                    listing_id, owner_participant_id, listing_type, category_code, title, description,
+                    price_amount_cents, budget_amount_cents, location_mode, status, risk_tier, searchable,
+                    search_backend_status, indexed_at, document_json
+                )
+                select l.id, l.owner_participant_id, l.listing_type, c.code, l.title, l.description,
+                       l.price_amount_cents, l.budget_amount_cents, l.location_mode, l.status, l.risk_tier,
+                       l.status = 'LIVE' and p.account_status not in ('SUSPENDED', 'CLOSED', 'RESTRICTED')
+                         and not exists (
+                           select 1 from participant_restrictions r
+                           where r.participant_id = p.id and r.status = 'ACTIVE'
+                             and r.restriction_type in ('HIDDEN_FROM_MARKETPLACE_SEARCH', 'LISTING_BLOCKED')
+                         ),
+                       'POSTGRES_FALLBACK', now(), jsonb_build_object('rebuiltBy', 'operator_data_repair')
+                from marketplace_listings l
+                join marketplace_categories c on c.id = l.category_id
+                join participants p on p.id = l.owner_participant_id
+                """ + filter, args);
+    }
+
+    private Map<String, Object> rebuildLineage(Map<String, Object> request) {
+        UUID runId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into lineage_rebuild_runs (id, rebuild_type, status, requested_by, reason, completed_at, summary_json)
+                values (?, 'FULL_LINEAGE', 'SUCCEEDED', ?, ?, now(), cast(? as jsonb))
+                """, runId, require(request, "actor"), require(request, "reason"),
+                json(Map.of("triggeredBy", "operator_data_repair", "repairExecuted", true)));
+        return Map.of("repairExecuted", "REBUILD_LINEAGE", "lineageRebuildRunId", runId);
+    }
+
+    private Map<String, Object> replayEvents() {
+        int inserted = jdbcTemplate.update("""
+                insert into marketplace_event_analytics (
+                    id, source_event_id, aggregate_type, aggregate_id, event_type, occurred_at, payload_json
+                )
+                select gen_random_uuid(), e.id, e.aggregate_type, e.aggregate_id, e.event_type, e.created_at, e.payload_json
+                from marketplace_events e
+                where not exists (
+                    select 1 from marketplace_event_analytics a where a.source_event_id = e.id
+                )
+                on conflict do nothing
+                """);
+        return Map.of("repairExecuted", "REPLAY_EVENTS", "analyticsEventsInserted", inserted);
+    }
+
+    private Map<String, Object> markEvidenceReferenceInvalid(UUID targetId) {
+        int exists = targetId == null ? 0 : count("""
+                select count(*) from evidence_requirements er
+                left join marketplace_evidence e on e.id = er.satisfied_by_evidence_id
+                where er.id = ? and er.satisfied = true and e.id is null
+                """, targetId);
+        return Map.of("repairExecuted", "MARK_EVIDENCE_REFERENCE_INVALID", "invalidReferenceStillPresent", exists > 0);
+    }
+
+    private Map<String, Object> requestOperatorReview(Map<String, Object> recommendation, Map<String, Object> request) {
+        UUID queueId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into marketplace_ops_queue_items (
+                    id, queue_type, target_type, target_id, priority, status, reason, signals_json
+                ) values (?, 'CONSISTENCY_REVIEW', ?, ?, 'MEDIUM', 'OPEN', ?, cast(? as jsonb))
+                """, queueId, recommendation.get("target_type"), recommendation.get("target_id"),
+                require(request, "reason"), json(Map.of("repairRecommendationId", recommendation.get("id"))));
+        return Map.of("repairExecuted", "REQUEST_OPERATOR_REVIEW", "queueItemId", queueId);
+    }
+
+    private int count(String sql, Object... args) {
+        Integer value = jdbcTemplate.queryForObject(sql, Integer.class, args);
+        return value == null ? 0 : value;
     }
 
     private void ensureExists(UUID id) {

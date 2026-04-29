@@ -62,6 +62,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=Pr7CarryForwardHardeningIntegrationTest,TrustTelemetryAndSloMonitorIntegrationTest,TrustIncidentLifecycleIntegrationTest,InternalAlertOpsDashboardIntegrationTest,IncidentReplayIntegrationTest,TrustScoreLineageExplanationIntegrationTest,RankingPolicyLineageIntegrationTest,DataConsistencyVerifierIntegrationTest,LineageRebuildRepairIntegrationTest,TrustGrid181To220OperationalControlPlaneE2EIntegrationTest" test
 
+      - name: Run final capability governance targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=Pr8OperationalHardeningIntegrationTest,CapabilityGovernancePolicyIntegrationTest,CapabilitySimulationIntegrationTest,TemporaryCapabilityGrantIntegrationTest,BreakGlassGovernanceIntegrationTest,CapabilityAccessRegressionIntegrationTest,FinalCapstoneInvariantRegressionIntegrationTest,FinalCapstonePerformanceProofIntegrationTest,FullDockerDemoScenarioIntegrationTest,FinalDocumentationPackagingSmokeTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api

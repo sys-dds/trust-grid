@@ -27,4 +27,8 @@ public class ConsistencyService {
     public List<Map<String, Object>> runs() {
         return repository.runs();
     }
+
+    public List<Map<String, Object>> findings() {
+        return repository.findings();
+    }
 }

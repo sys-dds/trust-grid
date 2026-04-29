@@ -5,6 +5,8 @@ import jakarta.validation.ConstraintViolationException;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -15,6 +17,7 @@ import org.springframework.web.bind.MissingRequestHeaderException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<ApiErrorResponse> handleMethodArgumentNotValid(
@@ -71,6 +74,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ApiErrorResponse> handleFallback(Exception exception, HttpServletRequest request) {
+        LOGGER.error("Unhandled TrustGrid API error", exception);
         return error(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected server error", request, List.of());
     }
 

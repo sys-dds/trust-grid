@@ -72,10 +72,18 @@ public class TrustTelemetryService {
         for (String type : List.of("MODERATION_BACKLOG", "DISPUTE_BACKLOG", "RISK_SPIKE", "REVIEW_ABUSE_SPIKE",
                 "TRUST_SCORE_SPIKE", "SEARCH_SUPPRESSION_SPIKE")) {
             int signal = repository.countForTarget(type);
-            int threshold = type.equals("TRUST_SCORE_SPIKE") ? 1 : 0;
-            String severity = signal >= threshold ? "HIGH" : "LOW";
+            Thresholds thresholds = thresholds(type);
+            String severity = severity(signal, thresholds);
+            int threshold = thresholdForSeverity(severity, thresholds);
+            String severityReason = severityReason(type, signal, severity, thresholds);
             UUID telemetryId = repository.record(type, type, null, severity, signal, threshold,
-                    "deterministic_rules_v1", Map.of("requestedBy", request.getOrDefault("requestedBy", "operator@example.com")));
+                    "deterministic_rules_v1", Map.of(
+                            "requestedBy", request.getOrDefault("requestedBy", "operator@example.com"),
+                            "severityReason", severityReason,
+                            "mediumThreshold", thresholds.medium(),
+                            "highThreshold", thresholds.high(),
+                            "criticalThreshold", thresholds.critical()
+                    ));
             outboxRepository.insert("TRUST_TELEMETRY", telemetryId, null, "TRUST_TELEMETRY_RECORDED",
                     Map.of("telemetryType", type, "severity", severity));
             UUID incidentId = null;
@@ -92,6 +100,8 @@ public class TrustTelemetryService {
             result.put("telemetryId", telemetryId);
             result.put("severity", severity);
             result.put("signalValue", signal);
+            result.put("thresholdValue", threshold);
+            result.put("severityReason", severityReason);
             result.put("incidentId", incidentId);
             result.put("alertId", alertId);
             results.add(result);
@@ -137,5 +147,47 @@ public class TrustTelemetryService {
 
     private Number number(Object value) {
         return value instanceof Number number ? number : null;
+    }
+
+    private Thresholds thresholds(String telemetryType) {
+        return switch (telemetryType) {
+            case "DISPUTE_BACKLOG", "RISK_SPIKE" -> new Thresholds(3, 10, 25);
+            case "REVIEW_ABUSE_SPIKE" -> new Thresholds(1, 3, 10);
+            case "TRUST_SCORE_SPIKE" -> new Thresholds(1, 5, 15);
+            case "MODERATION_BACKLOG", "SEARCH_SUPPRESSION_SPIKE" -> new Thresholds(5, 20, 50);
+            default -> new Thresholds(5, 20, 50);
+        };
+    }
+
+    private String severity(int signal, Thresholds thresholds) {
+        if (signal >= thresholds.critical()) {
+            return "CRITICAL";
+        }
+        if (signal >= thresholds.high()) {
+            return "HIGH";
+        }
+        if (signal >= thresholds.medium()) {
+            return "MEDIUM";
+        }
+        return "LOW";
+    }
+
+    private int thresholdForSeverity(String severity, Thresholds thresholds) {
+        return switch (severity) {
+            case "CRITICAL" -> thresholds.critical();
+            case "HIGH" -> thresholds.high();
+            case "MEDIUM" -> thresholds.medium();
+            default -> 0;
+        };
+    }
+
+    private String severityReason(String type, int signal, String severity, Thresholds thresholds) {
+        if ("LOW".equals(severity)) {
+            return type + " signal " + signal + " is below medium threshold " + thresholds.medium();
+        }
+        return type + " signal " + signal + " reached " + severity + " threshold " + thresholdForSeverity(severity, thresholds);
+    }
+
+    private record Thresholds(int medium, int high, int critical) {
     }
 }

@@ -122,6 +122,11 @@ public class ConsistencyRepository {
                 from (
                 """ + selectSql + """
                 ) findings
+                on conflict (finding_type, target_type, target_id) where status = 'OPEN' do update set
+                    severity = excluded.severity,
+                    message = excluded.message,
+                    metadata_json = excluded.metadata_json,
+                    last_seen_at = now()
                 """, type, targetType, severity);
     }
 
