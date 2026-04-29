@@ -67,6 +67,11 @@ jobs:
           cd apps/api
           ./mvnw "-Dtest=Pr8OperationalHardeningIntegrationTest,CapabilityGovernancePolicyIntegrationTest,CapabilitySimulationIntegrationTest,TemporaryCapabilityGrantIntegrationTest,BreakGlassGovernanceIntegrationTest,CapabilityAccessRegressionIntegrationTest,CapabilityReplayBlastRadiusAuditIntegrationTest,CapabilityGovernanceConsistencyRepairIntegrationTest,FinalCapstoneInvariantRegressionIntegrationTest,FullDockerDemoScenarioIntegrationTest" test
 
+      - name: Run trust safety final technical capstone targeted backend tests
+        run: |
+          cd apps/api
+          ./mvnw "-Dtest=Pr10CarryForwardHardeningIntegrationTest,TrustCaseWorkflowIntegrationTest,TrustCaseMergeSplitReplayIntegrationTest,CampaignGraphContainmentIntegrationTest,CampaignContainmentReversalIntegrationTest,EvidenceChainOfCustodyIntegrationTest,EvidenceAccessDisclosureRetentionIntegrationTest,MarketplaceGuaranteePolicyIntegrationTest,GuaranteeBoundaryInvariantIntegrationTest,EnforcementLadderIntegrationTest,TrustRecoveryPlanIntegrationTest,ModeratorQaPeerReviewIntegrationTest,SevereActionApprovalIntegrationTest,CaseQualityReviewIntegrationTest,AdversarialScenarioCatalogIntegrationTest,AdversarialFakeReviewAndRefundAbuseIntegrationTest,AdversarialEvidenceAndOffPlatformAbuseIntegrationTest,AdversarialHighValueAndCollusiveDisputeIntegrationTest,AdversarialGuaranteeAndListingSpamIntegrationTest,CrossDomainConsistencyRepairIntegrationTest,TrustDossierAndScaleProofIntegrationTest,TrustGrid241To360TechnicalCapstoneE2EIntegrationTest,FinalTechnicalCapstoneInvariantIntegrationTest" test
+
       - name: Run full backend tests
         run: |
           cd apps/api

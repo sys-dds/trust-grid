@@ -31,7 +31,8 @@ public class ConsistencyRepository {
             case "EVIDENCE_REFERENCE" -> evidence();
             case "DISPUTE" -> dispute();
             case "CAPABILITY" -> capability();
-            default -> trustProfile() + reputation() + searchIndex() + analytics() + evidence() + dispute() + capability();
+            default -> trustProfile() + reputation() + searchIndex() + analytics() + evidence() + dispute() + capability()
+                    + finalTrustSafety();
         };
         Map<String, Object> summary = Map.of("findings", findings, "autoRepair", false);
         jdbcTemplate.update("""
@@ -146,6 +147,61 @@ public class ConsistencyRepository {
                 join participants p on p.id = b.participant_id
                 where b.status = 'ACTIVE' and p.account_status = 'CLOSED'
                 """, "ACTIVE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT", "BREAK_GLASS_CAPABILITY_ACTION", "HIGH");
+        return findings;
+    }
+
+    int finalTrustSafety() {
+        int findings = insertFindings("""
+                select t.id as target_id, 'Trust case target references a missing source record' as message
+                from trust_case_targets t
+                where t.target_type = 'PARTICIPANT'
+                  and not exists (select 1 from participants p where p.id = t.target_id)
+                """, "TRUST_CASE_TARGET_INVALID", "TRUST_CASE_TARGET", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Assigned trust case is missing assignee' as message
+                from trust_cases
+                where status = 'ASSIGNED' and assigned_to is null
+                """, "TRUST_CASE_ASSIGNEE_MISSING", "TRUST_CASE", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Trust case SLA is overdue and unresolved' as message
+                from trust_cases
+                where sla_due_at < now() and status not in ('RESOLVED','FALSE_POSITIVE','CANCELLED')
+                """, "TRUST_CASE_SLA_OVERDUE", "TRUST_CASE", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Campaign graph edge references missing campaign' as message
+                from trust_campaign_graph_edges e
+                where not exists (select 1 from trust_campaigns c where c.id = e.campaign_id)
+                """, "CAMPAIGN_GRAPH_INVALID", "CAMPAIGN_GRAPH_EDGE", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Evidence versions are not sequential' as message
+                from evidence_versions ev
+                where version_number <= 0
+                """, "EVIDENCE_VERSION_SEQUENCE_INVALID", "EVIDENCE_VERSION", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Evidence custody hash mismatch requires review' as message
+                from evidence_custody_events
+                where event_type = 'HASH_MISMATCH_DETECTED'
+                """, "EVIDENCE_HASH_MISMATCH", "EVIDENCE", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Guarantee decision references a missing transaction' as message
+                from guarantee_decision_logs g
+                where transaction_id is not null and not exists (select 1 from marketplace_transactions t where t.id = g.transaction_id)
+                """, "GUARANTEE_REFERENCE_INVALID", "GUARANTEE_DECISION", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Severe enforcement action has no approval signal' as message
+                from enforcement_actions
+                where action_type in ('SUSPEND_ACCOUNT','PERMANENT_REMOVAL_RECOMMENDED') and risk_acknowledgement is null
+                """, "ENFORCEMENT_APPROVAL_MISSING", "ENFORCEMENT_ACTION", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Adversarial run has no expected controls recorded' as message
+                from adversarial_attack_runs r
+                where not exists (select 1 from detection_coverage_matrix m where m.attack_run_id = r.id and m.expected = true)
+                """, "ADVERSARIAL_COVERAGE_MISSING", "ATTACK_RUN", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Trust dossier snapshot target requires review' as message
+                from trust_dossier_snapshots
+                where target_id is null
+                """, "TRUST_DOSSIER_TARGET_INVALID", "TRUST_DOSSIER", "LOW");
         return findings;
     }
 

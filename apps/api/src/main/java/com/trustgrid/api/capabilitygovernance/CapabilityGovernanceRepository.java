@@ -113,15 +113,18 @@ public class CapabilityGovernanceRepository {
 
     UUID insertDecision(UUID participantId, String actionName, String targetType, UUID targetId, String decision,
                         String policyName, String policyVersion, List<Map<String, Object>> denyReasons,
-                        List<Map<String, Object>> nextSteps, Map<String, Object> inputSnapshot) {
+                        List<Map<String, Object>> nextSteps, Map<String, Object> inputSnapshot,
+                        Map<String, Object> policySnapshot) {
         UUID id = UUID.randomUUID();
+        String policyJson = json(policySnapshot);
         jdbcTemplate.update("""
                 insert into capability_decision_logs (
                     id, participant_id, action_name, target_type, target_id, decision, policy_name, policy_version,
-                    deny_reasons_json, next_steps_json, input_snapshot_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb), cast(? as jsonb))
+                    deny_reasons_json, next_steps_json, input_snapshot_json, policy_snapshot_json, policy_hash
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb), cast(? as jsonb),
+                          cast(? as jsonb), ?)
                 """, id, participantId, actionName, targetType, targetId, decision, policyName, policyVersion,
-                json(denyReasons), json(nextSteps), json(inputSnapshot));
+                json(denyReasons), json(nextSteps), json(inputSnapshot), policyJson, Integer.toHexString(policyJson.hashCode()));
         return id;
     }
 
@@ -279,19 +282,44 @@ public class CapabilityGovernanceRepository {
                 order by created_at desc limit 50
                 """, participantId));
         bundle.put("consistencyFindings", jdbcTemplate.queryForList("""
-                select * from consistency_findings
-                where target_id = ? and (
-                    target_type in ('PARTICIPANT', 'TEMPORARY_CAPABILITY_GRANT', 'BREAK_GLASS_CAPABILITY_ACTION')
-                    or finding_type like 'CAPABILITY_%' or finding_type like 'EXPIRED_%' or finding_type like 'ACTIVE_%'
-                )
-                order by created_at desc limit 25
-                """, participantId));
+                select f.* from consistency_findings f
+                left join temporary_capability_grants g
+                  on f.target_type = 'TEMPORARY_CAPABILITY_GRANT' and f.target_id = g.id
+                left join break_glass_capability_actions b
+                  on f.target_type = 'BREAK_GLASS_CAPABILITY_ACTION' and f.target_id = b.id
+                left join capability_decision_logs d
+                  on f.target_type = 'CAPABILITY_DECISION' and f.target_id = d.id
+                left join capability_governance_timeline_events t
+                  on f.target_type = 'CAPABILITY_GOVERNANCE_TIMELINE' and f.target_id = t.id
+                where f.target_id = ?
+                   or g.participant_id = ?
+                   or b.participant_id = ?
+                   or d.participant_id = ?
+                   or t.participant_id = ?
+                order by f.created_at desc limit 50
+                """, participantId, participantId, participantId, participantId, participantId));
         bundle.put("repairRecommendations", jdbcTemplate.queryForList("""
                 select r.* from data_repair_recommendations r
                 left join consistency_findings f on f.id = r.consistency_finding_id
+                left join temporary_capability_grants g
+                  on coalesce(r.target_type, f.target_type) = 'TEMPORARY_CAPABILITY_GRANT'
+                 and coalesce(r.target_id, f.target_id) = g.id
+                left join break_glass_capability_actions b
+                  on coalesce(r.target_type, f.target_type) = 'BREAK_GLASS_CAPABILITY_ACTION'
+                 and coalesce(r.target_id, f.target_id) = b.id
+                left join capability_decision_logs d
+                  on coalesce(r.target_type, f.target_type) = 'CAPABILITY_DECISION'
+                 and coalesce(r.target_id, f.target_id) = d.id
+                left join capability_governance_timeline_events t
+                  on coalesce(r.target_type, f.target_type) = 'CAPABILITY_GOVERNANCE_TIMELINE'
+                 and coalesce(r.target_id, f.target_id) = t.id
                 where r.target_id = ? or f.target_id = ?
-                order by r.created_at desc limit 25
-                """, participantId, participantId));
+                   or g.participant_id = ?
+                   or b.participant_id = ?
+                   or d.participant_id = ?
+                   or t.participant_id = ?
+                order by r.created_at desc limit 50
+                """, participantId, participantId, participantId, participantId, participantId, participantId));
         bundle.put("scope", "participant_capability_governance");
         return bundle;
     }

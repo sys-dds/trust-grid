@@ -35,6 +35,14 @@ public class DataRepairRepository {
                          when f.finding_type = 'CAPABILITY_DECISION_REPLAY_MISMATCH' then 'REQUEST_CAPABILITY_DECISION_REVIEW'
                          when f.finding_type = 'ACTIVE_GRANT_FOR_CLOSED_PARTICIPANT' then 'REVOKE_GRANT_FOR_CLOSED_PARTICIPANT'
                          when f.finding_type = 'ACTIVE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT' then 'REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT'
+                         when f.finding_type like 'TRUST_CASE_%' then 'REQUEST_TRUST_CASE_TARGET_REVIEW'
+                         when f.finding_type like 'CAMPAIGN_%' then 'REQUEST_CAMPAIGN_GRAPH_REBUILD'
+                         when f.finding_type like 'EVIDENCE_%' then 'REQUEST_EVIDENCE_CUSTODY_REVIEW'
+                         when f.finding_type like 'GUARANTEE_%' then 'REQUEST_GUARANTEE_MANUAL_REVIEW'
+                         when f.finding_type like 'ENFORCEMENT_%' then 'REQUEST_ENFORCEMENT_QA_REVIEW'
+                         when f.finding_type like 'RECOVERY_%' then 'REQUEST_RECOVERY_REVIEW'
+                         when f.finding_type like 'ADVERSARIAL_%' then 'REQUEST_ADVERSARIAL_COVERAGE_REVIEW'
+                         when f.finding_type like 'TRUST_DOSSIER_%' then 'REQUEST_TRUST_DOSSIER_REBUILD'
                          else 'REQUEST_OPERATOR_REVIEW'
                        end,
                        f.target_type, f.target_id, f.severity,
@@ -77,6 +85,10 @@ public class DataRepairRepository {
         require(request, "actor");
         require(request, "reason");
         require(request, "riskAcknowledgement");
+        String status = before.get("status").toString();
+        if (!List.of("PROPOSED", "APPROVED").contains(status)) {
+            throw new ConflictException("Data repair recommendation cannot be applied from current state");
+        }
         Map<String, Object> repairResult = executeRepair(before, request);
         int updated = jdbcTemplate.update("""
                 update data_repair_recommendations set status = 'APPLIED', decided_at = now()
@@ -140,6 +152,14 @@ public class DataRepairRepository {
             case "REQUEST_CAPABILITY_DECISION_REVIEW" -> "REQUEST_CAPABILITY_DECISION_REVIEW";
             case "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT" -> "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT";
             case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT";
+            case "REQUEST_TRUST_CASE_TARGET_REVIEW" -> "REQUEST_TRUST_CASE_TARGET_REVIEW";
+            case "REQUEST_CAMPAIGN_GRAPH_REBUILD" -> "REQUEST_CAMPAIGN_GRAPH_REBUILD";
+            case "REQUEST_EVIDENCE_CUSTODY_REVIEW" -> "REQUEST_EVIDENCE_CUSTODY_REVIEW";
+            case "REQUEST_GUARANTEE_MANUAL_REVIEW" -> "REQUEST_GUARANTEE_MANUAL_REVIEW";
+            case "REQUEST_ENFORCEMENT_QA_REVIEW" -> "REQUEST_ENFORCEMENT_QA_REVIEW";
+            case "REQUEST_RECOVERY_REVIEW" -> "REQUEST_RECOVERY_REVIEW";
+            case "REQUEST_ADVERSARIAL_COVERAGE_REVIEW" -> "REQUEST_ADVERSARIAL_COVERAGE_REVIEW";
+            case "REQUEST_TRUST_DOSSIER_REBUILD" -> "REQUEST_TRUST_DOSSIER_REBUILD";
             default -> "MARK_FINDING_RESOLVED";
         };
     }
@@ -159,6 +179,11 @@ public class DataRepairRepository {
             case "REQUEST_CAPABILITY_DECISION_REVIEW" -> requestOperatorReview(recommendation, request);
             case "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT" -> revokeGrantForClosedParticipant(targetId, request);
             case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> revokeBreakGlassForClosedParticipant(targetId, request);
+            case "REQUEST_TRUST_CASE_TARGET_REVIEW", "REQUEST_CAMPAIGN_GRAPH_REBUILD",
+                    "REQUEST_EVIDENCE_CUSTODY_REVIEW", "REQUEST_GUARANTEE_MANUAL_REVIEW",
+                    "REQUEST_ENFORCEMENT_QA_REVIEW", "REQUEST_RECOVERY_REVIEW",
+                    "REQUEST_ADVERSARIAL_COVERAGE_REVIEW", "REQUEST_TRUST_DOSSIER_REBUILD" ->
+                    requestOperatorReview(recommendation, request);
             case "MANUAL_REPAIR_REQUIRED" -> Map.of("repairExecuted", "MANUAL_REPAIR_RECORDED", "autoRepair", false);
             default -> Map.of("repairExecuted", "MARK_FINDING_RESOLVED", "autoRepair", false);
         };
