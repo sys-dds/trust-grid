@@ -52,10 +52,14 @@ public class TrustCampaignController {
     }
 
     @PostMapping("/api/v1/trust-campaigns/containment-plans/{planId}/execute")
-    Map<String, Object> execute(@PathVariable UUID planId) { return service.executeContainment(planId); }
+    Map<String, Object> execute(@PathVariable UUID planId, @RequestBody(required = false) Map<String, Object> request) {
+        return service.executeContainment(planId, request == null ? Map.of() : request);
+    }
 
     @PostMapping("/api/v1/trust-campaigns/containment-plans/{planId}/reverse")
-    Map<String, Object> reverse(@PathVariable UUID planId) { return service.reverseContainment(planId); }
+    Map<String, Object> reverse(@PathVariable UUID planId, @RequestBody(required = false) Map<String, Object> request) {
+        return service.reverseContainment(planId, request == null ? Map.of() : request);
+    }
 
     @GetMapping("/api/v1/trust-campaigns/{campaignId}/timeline")
     List<Map<String, Object>> timeline(@PathVariable UUID campaignId) { return service.campaignTimeline(campaignId); }

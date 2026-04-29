@@ -1,6 +1,7 @@
 package com.trustgrid.api.trustsafety;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.trustgrid.api.shared.ConflictException;
 import com.trustgrid.api.shared.NotFoundException;
 import com.trustgrid.api.shared.OutboxRepository;
@@ -149,25 +150,81 @@ public class TrustSafetyService {
 
     @Transactional
     public Map<String, Object> splitCase(UUID caseId, Map<String, Object> request) {
+        String splitActor = actor(request);
+        String splitReason = reason(request);
+        List<UUID> targetIds = uuidList(request.get("targetIds"));
+        if (targetIds.isEmpty()) {
+            throw new IllegalArgumentException("targetIds is required");
+        }
         Map<String, Object> source = getCase(caseId);
+        List<Map<String, Object>> selectedTargets = jdbcTemplate.queryForList("""
+                select * from trust_case_targets
+                where case_id = ? and id = any(?::uuid[])
+                order by created_at
+                """, caseId, targetIds.toArray(UUID[]::new));
+        if (selectedTargets.size() != targetIds.size()) {
+            throw new ConflictException("Every split target must belong to the source case");
+        }
+        boolean copy = Boolean.TRUE.equals(request.get("copyInsteadOfMove"));
         UUID newCase = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into trust_cases (id, case_type, status, priority, title, summary, opened_by, reason, metadata_json)
                 values (?, ?, 'OPEN', ?, ?, ?, ?, ?, '{}'::jsonb)
                 """, newCase, source.get("case_type"), source.get("priority"), source.get("title") + " split",
-                source.get("summary"), actor(request), reason(request));
-        caseTimeline(caseId, "TRUST_CASE_SPLIT", actor(request), reason(request), Map.of("newCaseId", newCase));
-        outbox.insert("TRUST_CASE", newCase, null, "TRUST_CASE_SPLIT", Map.of("sourceCaseId", caseId));
-        return Map.of("sourceCaseId", caseId, "newCaseId", newCase);
+                source.get("summary"), splitActor, splitReason);
+        if (copy) {
+            for (Map<String, Object> target : selectedTargets) {
+                jdbcTemplate.update("""
+                        insert into trust_case_targets (id, case_id, target_type, target_id, relationship_type, added_by, reason)
+                        values (?, ?, ?, ?, ?, ?, ?)
+                        on conflict (case_id, target_type, target_id) do nothing
+                        """, UUID.randomUUID(), newCase, target.get("target_type"), target.get("target_id"),
+                        target.get("relationship_type"), splitActor, splitReason);
+            }
+        } else {
+            jdbcTemplate.update("""
+                    update trust_case_targets set case_id = ?, added_by = ?, reason = ?
+                    where case_id = ? and id = any(?::uuid[])
+                    """, newCase, splitActor, splitReason, caseId, targetIds.toArray(UUID[]::new));
+        }
+        Map<String, Object> payload = Map.of("newCaseId", newCase, "targetIds", targetIds, "copied", copy);
+        caseTimeline(caseId, "TRUST_CASE_SPLIT", splitActor, splitReason, payload);
+        caseTimeline(newCase, "TRUST_CASE_SPLIT", splitActor, splitReason, Map.of("sourceCaseId", caseId, "targetIds", targetIds, "copied", copy));
+        outbox.insert("TRUST_CASE", newCase, null, "TRUST_CASE_SPLIT", Map.of("sourceCaseId", caseId, "targetIds", targetIds, "copied", copy));
+        return Map.of("sourceCaseId", caseId, "newCaseId", newCase, "movedTargetCount", selectedTargets.size(),
+                "copied", copy, "movedTargetIds", targetIds);
     }
 
     @Transactional
-    public Map<String, Object> replayCase(UUID caseId) {
+    public Map<String, Object> replayCase(UUID caseId, Map<String, Object> request) {
         int targets = count("select count(*) from trust_case_targets where case_id = ?", caseId);
-        int events = count("select count(*) from trust_case_timeline_events where case_id = ?", caseId);
-        caseTimeline(caseId, "TRUST_CASE_REPLAYED", "system", "Deterministic case replay", Map.of("targets", targets, "events", events));
-        outbox.insert("TRUST_CASE", caseId, null, "TRUST_CASE_REPLAYED", Map.of("targets", targets, "timelineEvents", events));
-        return Map.of("caseId", caseId, "targetCount", targets, "timelineEventCount", events, "deterministic", true);
+        int semanticEvents = count("""
+                select count(*) from trust_case_timeline_events
+                where case_id = ? and event_type <> 'TRUST_CASE_REPLAYED'
+                """, caseId);
+        int replayEvents = count("""
+                select count(*) from trust_case_timeline_events
+                where case_id = ? and event_type = 'TRUST_CASE_REPLAYED'
+                """, caseId);
+        Map<String, Object> source = one("select status from trust_cases where id = ?", caseId);
+        List<Object> reconstructedTargetIds = jdbcTemplate.queryForList("""
+                select target_id from trust_case_targets where case_id = ? order by target_type, target_id
+                """, Object.class, caseId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("caseId", caseId);
+        result.put("targetCount", targets);
+        result.put("semanticTimelineEventCount", semanticEvents);
+        result.put("replayEventCount", replayEvents);
+        result.put("deterministic", true);
+        result.put("reconstructedStatus", source.get("status"));
+        result.put("reconstructedTargetIds", reconstructedTargetIds);
+        if (Boolean.TRUE.equals(request.get("recordReplayEvent"))) {
+            caseTimeline(caseId, "TRUST_CASE_REPLAYED", actor(request), reason(request),
+                    Map.of("targets", targets, "semanticTimelineEvents", semanticEvents, "replayEventsBefore", replayEvents));
+            outbox.insert("TRUST_CASE", caseId, null, "TRUST_CASE_REPLAYED",
+                    Map.of("targets", targets, "semanticTimelineEvents", semanticEvents));
+        }
+        return result;
     }
 
     public Map<String, Object> caseMetrics() {
@@ -263,29 +320,57 @@ public class TrustSafetyService {
     }
 
     @Transactional
-    public Map<String, Object> executeContainment(UUID planId) {
+    public Map<String, Object> executeContainment(UUID planId, Map<String, Object> request) {
         Map<String, Object> plan = one("select * from campaign_containment_plans where id = ?", planId);
+        if ("EXECUTED".equals(plan.get("status"))) {
+            int existing = count("select count(*) from campaign_containment_actions where containment_plan_id = ?", planId);
+            return Map.of("planId", planId, "status", "EXECUTED", "actionsExecuted", existing, "idempotent", true);
+        }
         if (!"APPROVED".equals(plan.get("status"))) throw new ConflictException("Containment plan must be approved");
-        UUID actionId = UUID.randomUUID();
-        UUID campaignId = (UUID) plan.get("campaign_id");
-        jdbcTemplate.update("""
-                insert into campaign_containment_actions (id, containment_plan_id, action_type, target_type, target_id, status, before_json, after_json, executed_at)
-                values (?, ?, 'OPEN_TRUST_CASE', 'CAMPAIGN', ?, 'EXECUTED', '{}'::jsonb, '{"contained": true}'::jsonb, now())
-                """, actionId, planId, campaignId);
+        List<Map<String, Object>> actions = jsonList(plan.get("actions_json"));
+        if (actions.isEmpty()) throw new IllegalArgumentException("Containment plan actions_json must not be empty");
+        for (Map<String, Object> action : actions) {
+            validateContainmentAction(action);
+        }
+        List<UUID> actionIds = new ArrayList<>();
+        for (Map<String, Object> action : actions) {
+            actionIds.add(executeContainmentAction(planId, (UUID) plan.get("campaign_id"), action));
+        }
         jdbcTemplate.update("update campaign_containment_plans set status = 'EXECUTED', executed_at = now() where id = ?", planId);
-        outbox.insert("CONTAINMENT_PLAN", planId, null, "CAMPAIGN_CONTAINMENT_EXECUTED", Map.of("actionId", actionId));
-        return Map.of("planId", planId, "status", "EXECUTED", "actionId", actionId);
+        outbox.insert("CONTAINMENT_PLAN", planId, null, "CAMPAIGN_CONTAINMENT_EXECUTED", Map.of("actionIds", actionIds));
+        return Map.of("planId", planId, "status", "EXECUTED", "actionIds", actionIds, "actionsExecuted", actionIds.size());
     }
 
     @Transactional
-    public Map<String, Object> reverseContainment(UUID planId) {
-        int reversed = jdbcTemplate.update("""
-                update campaign_containment_actions set status = 'REVERSED', reversed_at = now()
-                where containment_plan_id = ? and status = 'EXECUTED'
-                """, planId);
+    public Map<String, Object> reverseContainment(UUID planId, Map<String, Object> request) {
+        require(request, "actor");
+        require(request, "reason");
+        require(request, "riskAcknowledgement");
+        Map<String, Object> plan = one("select * from campaign_containment_plans where id = ?", planId);
+        if ("REVERSED".equals(plan.get("status"))) {
+            int existing = count("select count(*) from campaign_containment_actions where containment_plan_id = ? and status in ('REVERSED','REVERSAL_CONFLICT')", planId);
+            return Map.of("planId", planId, "actionsReversed", existing, "status", "REVERSED", "idempotent", true);
+        }
+        if (!List.of("EXECUTED", "PARTIALLY_EXECUTED").contains(plan.get("status"))) {
+            throw new ConflictException("Containment plan must be executed before reversal");
+        }
+        int reversed = 0;
+        int conflicts = 0;
+        for (Map<String, Object> action : jdbcTemplate.queryForList("""
+                select * from campaign_containment_actions where containment_plan_id = ? and status = 'EXECUTED'
+                order by created_at
+                """, planId)) {
+            Map<String, Object> reversal = reverseContainmentAction(action, request);
+            if (Boolean.TRUE.equals(reversal.get("conflict"))) {
+                conflicts++;
+            } else {
+                reversed++;
+            }
+        }
         jdbcTemplate.update("update campaign_containment_plans set status = 'REVERSED', reversed_at = now() where id = ?", planId);
-        outbox.insert("CONTAINMENT_PLAN", planId, null, "CAMPAIGN_CONTAINMENT_REVERSED", Map.of("actionsReversed", reversed));
-        return Map.of("planId", planId, "actionsReversed", reversed, "status", "REVERSED");
+        outbox.insert("CONTAINMENT_PLAN", planId, null, "CAMPAIGN_CONTAINMENT_REVERSED",
+                Map.of("actionsReversed", reversed, "conflicts", conflicts, "actor", actor(request)));
+        return Map.of("planId", planId, "actionsReversed", reversed, "conflicts", conflicts, "status", "REVERSED");
     }
 
     public List<Map<String, Object>> campaignTimeline(UUID campaignId) {
@@ -295,6 +380,192 @@ public class TrustSafetyService {
                 select status as event_type, created_at, blast_radius_json as payload_json from campaign_containment_plans where campaign_id = ?
                 order by created_at
                 """, campaignId, campaignId);
+    }
+
+    private void validateContainmentAction(Map<String, Object> action) {
+        String actionType = require(action, "actionType");
+        String targetType = require(action, "targetType");
+        uuid(action, "targetId");
+        if (!List.of("OPEN_TRUST_CASE", "HIDE_LISTING", "RESTRICT_CAPABILITY", "REQUIRE_VERIFICATION",
+                "SUPPRESS_REVIEW_WEIGHT", "CREATE_OPS_QUEUE_ITEM", "ESCALATE_DISPUTE", "REQUEST_EVIDENCE",
+                "REQUEST_PAYOUT_HOLD", "REQUEST_GUARANTEE_REVIEW").contains(actionType)) {
+            throw new IllegalArgumentException("Unsupported containment actionType");
+        }
+        if ("HIDE_LISTING".equals(actionType) && !"LISTING".equals(targetType)) {
+            throw new IllegalArgumentException("HIDE_LISTING requires LISTING target");
+        }
+        if (List.of("RESTRICT_CAPABILITY", "REQUIRE_VERIFICATION").contains(actionType) && !"PARTICIPANT".equals(targetType)) {
+            throw new IllegalArgumentException(actionType + " requires PARTICIPANT target");
+        }
+        if ("ESCALATE_DISPUTE".equals(actionType) && !"DISPUTE".equals(targetType)) {
+            throw new IllegalArgumentException("ESCALATE_DISPUTE requires DISPUTE target");
+        }
+    }
+
+    private UUID executeContainmentAction(UUID planId, UUID campaignId, Map<String, Object> action) {
+        String actionType = require(action, "actionType");
+        String targetType = require(action, "targetType");
+        UUID targetId = uuid(action, "targetId");
+        Map<String, Object> before = containmentBefore(actionType, targetType, targetId);
+        Map<String, Object> after = switch (actionType) {
+            case "OPEN_TRUST_CASE" -> containmentOpenCase(planId, campaignId, targetType, targetId);
+            case "HIDE_LISTING" -> containmentHideListing(planId, targetId);
+            case "RESTRICT_CAPABILITY" -> containmentRestriction(planId, targetId, "ACCEPTING_BLOCKED");
+            case "REQUIRE_VERIFICATION" -> containmentRestriction(planId, targetId, "REQUIRES_VERIFICATION");
+            case "SUPPRESS_REVIEW_WEIGHT" -> containmentOpsQueue(actionType, targetType, targetId, "Review suppression requested by campaign containment");
+            case "CREATE_OPS_QUEUE_ITEM" -> containmentOpsQueue(actionType, targetType, targetId, "Campaign containment manual review");
+            case "ESCALATE_DISPUTE" -> containmentEscalateDispute(planId, targetId);
+            case "REQUEST_EVIDENCE" -> containmentRequestEvidence(planId, targetType, targetId);
+            case "REQUEST_PAYOUT_HOLD" -> containmentPayoutHold(planId, targetType, targetId);
+            case "REQUEST_GUARANTEE_REVIEW" -> containmentOpsQueue(actionType, targetType, targetId, "Guarantee review requested by containment");
+            default -> throw new IllegalArgumentException("Unsupported containment actionType");
+        };
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into campaign_containment_actions (
+                    id, containment_plan_id, action_type, target_type, target_id, status, before_json, after_json, executed_at
+                ) values (?, ?, ?, ?, ?, 'EXECUTED', cast(? as jsonb), cast(? as jsonb), now())
+                """, id, planId, actionType, targetType, targetId, json(before), json(after));
+        return id;
+    }
+
+    private Map<String, Object> containmentBefore(String actionType, String targetType, UUID targetId) {
+        return switch (actionType) {
+            case "HIDE_LISTING" -> safeOne("select id, status, moderation_status from marketplace_listings where id = ?", targetId);
+            case "RESTRICT_CAPABILITY", "REQUIRE_VERIFICATION" -> Map.of(
+                    "activeRestrictions", jdbcTemplate.queryForList("select id, restriction_type, status from participant_restrictions where participant_id = ? and status = 'ACTIVE'", targetId));
+            case "ESCALATE_DISPUTE" -> safeOne("select id, status from marketplace_disputes where id = ?", targetId);
+            default -> Map.of("targetType", targetType, "targetId", targetId);
+        };
+    }
+
+    private Map<String, Object> containmentOpenCase(UUID planId, UUID campaignId, String targetType, UUID targetId) {
+        UUID caseId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into trust_cases (id, case_type, status, priority, title, summary, opened_by, reason, metadata_json)
+                values (?, 'CAMPAIGN_INVESTIGATION', 'OPEN', 'HIGH', ?, ?, 'system', ?, cast(? as jsonb))
+                """, caseId, "Containment case " + planId, "Case opened from campaign containment",
+                "Campaign containment action", json(Map.of("campaignId", campaignId, "containmentPlanId", planId)));
+        jdbcTemplate.update("""
+                insert into trust_case_targets (id, case_id, target_type, target_id, relationship_type, added_by, reason)
+                values (?, ?, ?, ?, 'CONTAINMENT_TARGET', 'system', ?)
+                on conflict (case_id, target_type, target_id) do nothing
+                """, UUID.randomUUID(), caseId, targetType, targetId, "Campaign containment target");
+        caseTimeline(caseId, "TRUST_CASE_OPENED", "system", "Campaign containment action", Map.of("containmentPlanId", planId));
+        return Map.of("caseId", caseId);
+    }
+
+    private Map<String, Object> containmentHideListing(UUID planId, UUID listingId) {
+        int updated = jdbcTemplate.update("""
+                update marketplace_listings
+                set status = 'HIDDEN', moderation_status = 'MODERATOR_HIDDEN', hidden_at = now(), updated_at = now()
+                where id = ?
+                """, listingId);
+        if (updated == 0) throw new NotFoundException("Listing not found for containment");
+        return Map.of("status", "HIDDEN", "containmentPlanId", planId);
+    }
+
+    private Map<String, Object> containmentRestriction(UUID planId, UUID participantId, String restrictionType) {
+        UUID restrictionId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into participant_restrictions (
+                    id, participant_id, restriction_type, status, actor, reason, metadata_json
+                ) values (?, ?, ?, 'ACTIVE', 'system', ?, cast(? as jsonb))
+                """, restrictionId, participantId, restrictionType, "Campaign containment restriction",
+                json(Map.of("containmentPlanId", planId)));
+        return Map.of("restrictionId", restrictionId, "restrictionType", restrictionType, "status", "ACTIVE");
+    }
+
+    private Map<String, Object> containmentOpsQueue(String actionType, String targetType, UUID targetId, String queueReason) {
+        UUID queueId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into marketplace_ops_queue_items (id, queue_type, target_type, target_id, priority, status, reason, signals_json)
+                values (?, ?, ?, ?, 'HIGH', 'OPEN', ?, cast(? as jsonb))
+                on conflict (queue_type, target_type, target_id, status) do nothing
+                """, queueId, actionType, targetType, targetId, queueReason, json(Map.of("containmentAction", actionType)));
+        return Map.of("queueItemId", queueId, "manualReview", true);
+    }
+
+    private Map<String, Object> containmentEscalateDispute(UUID planId, UUID disputeId) {
+        int updated = jdbcTemplate.update("update marketplace_disputes set status = 'ESCALATED', updated_at = now() where id = ?", disputeId);
+        if (updated == 0) throw new NotFoundException("Dispute not found for containment");
+        return Map.of("status", "ESCALATED", "containmentPlanId", planId);
+    }
+
+    private Map<String, Object> containmentRequestEvidence(UUID planId, String targetType, UUID targetId) {
+        UUID requirementId = UUID.randomUUID();
+        String evidenceTarget = "LISTING".equals(targetType) || "TRANSACTION".equals(targetType) || "DISPUTE".equals(targetType) || "PARTICIPANT".equals(targetType)
+                ? targetType : "PARTICIPANT";
+        jdbcTemplate.update("""
+                insert into evidence_requirements (id, target_type, target_id, evidence_type, required_before_action, reason)
+                values (?, ?, ?, 'USER_STATEMENT', 'CAMPAIGN_CONTAINMENT_REVIEW', ?)
+                """, requirementId, evidenceTarget, targetId, "Evidence requested by containment plan " + planId);
+        return Map.of("evidenceRequirementId", requirementId);
+    }
+
+    private Map<String, Object> containmentPayoutHold(UUID planId, String targetType, UUID targetId) {
+        UUID transactionId = "TRANSACTION".equals(targetType) ? targetId : null;
+        if (transactionId == null) {
+            return containmentOpsQueue("REQUEST_PAYOUT_HOLD", targetType, targetId, "Payout hold review requested; transaction target required for boundary event");
+        }
+        jdbcTemplate.update("""
+                insert into payment_boundary_events (id, transaction_id, event_type, event_key, reason, requested_by, payload_json)
+                values (?, ?, 'MARKETPLACE_PAYOUT_HOLD_REQUESTED', ?, 'Campaign containment payout hold recommendation', 'system', cast(? as jsonb))
+                on conflict (event_key) do nothing
+                """, UUID.randomUUID(), transactionId, "containment-" + planId + "-payout-hold-" + transactionId,
+                json(Map.of("containmentPlanId", planId, "noMoneyMovement", true)));
+        return Map.of("paymentBoundaryRecommendation", "MARKETPLACE_PAYOUT_HOLD_REQUESTED", "noMoneyMovement", true);
+    }
+
+    private Map<String, Object> reverseContainmentAction(Map<String, Object> action, Map<String, Object> request) {
+        String actionType = action.get("action_type").toString();
+        UUID targetId = (UUID) action.get("target_id");
+        Map<String, Object> before = jsonMap(action.get("before_json"));
+        Map<String, Object> after = jsonMap(action.get("after_json"));
+        Map<String, Object> reversal = new LinkedHashMap<>();
+        reversal.put("actor", actor(request));
+        reversal.put("reason", reason(request));
+        reversal.put("riskAcknowledgement", require(request, "riskAcknowledgement"));
+        reversal.put("conflict", false);
+        switch (actionType) {
+            case "HIDE_LISTING" -> {
+                Map<String, Object> current = safeOne("select id, status, moderation_status from marketplace_listings where id = ?", targetId);
+                if ("HIDDEN".equals(current.get("status")) && "HIDDEN".equals(after.get("status"))) {
+                    jdbcTemplate.update("""
+                            update marketplace_listings set status = ?, moderation_status = ?, updated_at = now()
+                            where id = ?
+                            """, before.getOrDefault("status", "LIVE"), before.getOrDefault("moderation_status", "AUTO_APPROVED"), targetId);
+                    reversal.put("restoredStatus", before.getOrDefault("status", "LIVE"));
+                } else {
+                    reversal.put("conflict", true);
+                    reversal.put("currentStatus", current.get("status"));
+                }
+            }
+            case "RESTRICT_CAPABILITY", "REQUIRE_VERIFICATION" -> {
+                int removed = jdbcTemplate.update("""
+                        update participant_restrictions
+                        set status = 'REMOVED', removed_at = now(), removed_by = ?, remove_reason = ?
+                        where participant_id = ? and status = 'ACTIVE' and metadata_json->>'containmentPlanId' = ?
+                        """, actor(request), reason(request), targetId, action.get("containment_plan_id").toString());
+                reversal.put("restrictionsRemoved", removed);
+            }
+            case "REQUEST_PAYOUT_HOLD" -> reversal.put("noMoneyMovement", true);
+            case "OPEN_TRUST_CASE" -> {
+                Object caseId = after.get("caseId");
+                if (caseId != null) {
+                    caseTimeline(UUID.fromString(caseId.toString()), "CONTAINMENT_REVERSED", actor(request), reason(request),
+                            Map.of("containmentActionId", action.get("id")));
+                }
+                reversal.put("caseDeleted", false);
+            }
+            default -> reversal.put("manualReviewOnly", true);
+        }
+        jdbcTemplate.update("""
+                update campaign_containment_actions
+                set status = ?, reversed_at = now(), reversal_json = cast(? as jsonb)
+                where id = ?
+                """, Boolean.TRUE.equals(reversal.get("conflict")) ? "REVERSAL_CONFLICT" : "REVERSED", json(reversal), action.get("id"));
+        return reversal;
     }
 
     @Transactional
@@ -425,28 +696,68 @@ public class TrustSafetyService {
 
     @Transactional
     public Map<String, Object> guaranteeEligibility(Map<String, Object> request) {
-        UUID id = UUID.randomUUID();
         UUID transactionId = optionalUuid(request.get("transactionId"));
         UUID disputeId = optionalUuid(request.get("disputeId"));
         UUID participantId = optionalUuid(request.get("participantId"));
+        String policyName = request.getOrDefault("policyName", "guarantee_policy").toString();
+        String policyVersion = request.getOrDefault("policyVersion", "guarantee_policy_v1").toString();
         Map<String, Object> tx = transactionId == null ? Map.of() : jdbcTemplate.queryForList("select * from marketplace_transactions where id = ?", transactionId).stream().findFirst().orElse(Map.of());
-        boolean completed = "COMPLETED".equals(string(tx.get("status")));
-        boolean fraud = Boolean.TRUE.equals(request.get("fraudSignal"));
-        String decision = fraud ? "FRAUD_EXCLUDED" : completed ? "ELIGIBLE" : "NEEDS_EVIDENCE";
-        String recommendation = "ELIGIBLE".equals(decision) ? "REQUEST_REFUND" : "MANUAL_REVIEW";
-        List<Map<String, Object>> deny = completed && !fraud ? List.of() : List.of(Map.of("code", fraud ? "FRAUD_EXCLUSION" : "TRANSACTION_NOT_COMPLETED"));
+        Map<String, Object> dispute = disputeId == null ? Map.of() : safeOne("select * from marketplace_disputes where id = ?", disputeId);
+        Map<String, Object> policy = safeOne("""
+                select * from marketplace_guarantee_policies
+                where policy_name = ? and policy_version = ? and enabled = true
+                order by created_at desc limit 1
+                """, policyName, policyVersion);
+        List<String> requiredEvidence = requiredEvidence(policy, request);
+        Map<String, Object> evaluation = evaluateGuarantee(tx, dispute, policy, requiredEvidence, request, transactionId, disputeId, participantId);
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("transactionId", transactionId);
+        snapshot.put("disputeId", disputeId);
+        snapshot.put("participantId", participantId);
+        snapshot.put("policyName", policyName);
+        snapshot.put("policyVersion", policyVersion);
+        snapshot.put("transactionStatus", tx.get("status"));
+        snapshot.put("transactionValueCents", tx.get("value_amount_cents"));
+        snapshot.put("disputeStatus", dispute.get("status"));
+        snapshot.put("disputeOutcome", dispute.get("outcome"));
+        snapshot.put("requiredEvidence", requiredEvidence);
+        snapshot.put("decisionInputs", evaluation.get("inputSignals"));
+        String snapshotJson = json(snapshot);
+        String idempotencyKey = string(request.get("idempotencyKey"));
+        if (idempotencyKey != null) {
+            List<Map<String, Object>> existing = jdbcTemplate.queryForList("""
+                    select *
+                    from guarantee_decision_logs
+                    where idempotency_key = ?
+                    order by created_at desc limit 1
+                    """, idempotencyKey);
+            if (!existing.isEmpty()) {
+                Map<String, Object> row = existing.getFirst();
+                int sameInput = count("""
+                        select count(*) from guarantee_decision_logs
+                        where id = ? and input_snapshot_json = cast(? as jsonb)
+                        """, row.get("id"), snapshotJson);
+                if (sameInput == 0) {
+                    throw new ConflictException("Guarantee idempotency key was already used for different inputs");
+                }
+                return Map.of("decisionId", row.get("id"), "decision", row.get("decision"),
+                        "denyReasons", jsonList(row.get("deny_reasons_json")),
+                        "requiredEvidence", jsonList(row.get("required_evidence_json")),
+                        "recommendation", row.get("recommendation"), "idempotent", true);
+            }
+        }
+        UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into guarantee_decision_logs (
                     id, transaction_id, dispute_id, participant_id, policy_name, policy_version, decision,
                     deny_reasons_json, required_evidence_json, recommendation, input_snapshot_json, idempotency_key
                 ) values (?, ?, ?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb), ?, cast(? as jsonb), ?)
-                """, id, transactionId, disputeId, participantId, request.getOrDefault("policyName", "guarantee_policy"),
-                request.getOrDefault("policyVersion", "guarantee_policy_v1"), decision, json(deny),
-                json(request.getOrDefault("requiredEvidence", List.of("transaction_outcome"))), recommendation,
-                json(Map.of("transaction", tx, "fraudSignal", fraud)), request.get("idempotencyKey"));
-        guaranteeTimeline(id, "GUARANTEE_DECISION_RECORDED", actor(request), reason(request), Map.of("decision", decision));
-        outbox.insert("GUARANTEE_DECISION", id, participantId, "GUARANTEE_ELIGIBILITY_SIMULATED", Map.of("decision", decision));
-        return Map.of("decisionId", id, "decision", decision, "denyReasons", deny, "recommendation", recommendation);
+                """, id, transactionId, disputeId, participantId, policyName, policyVersion, evaluation.get("decision"),
+                json(evaluation.get("denyReasons")), json(requiredEvidence), evaluation.get("recommendation"), snapshotJson, idempotencyKey);
+        guaranteeTimeline(id, "GUARANTEE_DECISION_RECORDED", actor(request), reason(request), Map.of("decision", evaluation.get("decision")));
+        outbox.insert("GUARANTEE_DECISION", id, participantId, "GUARANTEE_ELIGIBILITY_SIMULATED", Map.of("decision", evaluation.get("decision")));
+        return Map.of("decisionId", id, "decision", evaluation.get("decision"), "denyReasons", evaluation.get("denyReasons"),
+                "requiredEvidence", requiredEvidence, "recommendation", evaluation.get("recommendation"), "inputSnapshot", snapshot);
     }
 
     public Map<String, Object> guaranteeDecision(UUID id) {
@@ -457,10 +768,135 @@ public class TrustSafetyService {
         return jdbcTemplate.queryForList("select * from guarantee_audit_timeline_events where guarantee_decision_id = ? order by created_at", id);
     }
 
+    private List<String> requiredEvidence(Map<String, Object> policy, Map<String, Object> request) {
+        Object source = policy.isEmpty() ? request.getOrDefault("requiredEvidence", List.of()) : policy.get("required_evidence_json");
+        return stringList(source);
+    }
+
+    private Map<String, Object> evaluateGuarantee(Map<String, Object> tx, Map<String, Object> dispute,
+                                                   Map<String, Object> policy, List<String> requiredEvidence,
+                                                   Map<String, Object> request, UUID transactionId, UUID disputeId,
+                                                   UUID participantId) {
+        List<Map<String, Object>> deny = new ArrayList<>();
+        Map<String, Object> inputSignals = new LinkedHashMap<>();
+        boolean completed = "COMPLETED".equals(string(tx.get("status")));
+        long value = tx.get("value_amount_cents") instanceof Number number ? number.longValue() : 0L;
+        Long maxValue = longValue(policy.get("max_value_cents"));
+        int evidenceCount = transactionId == null ? 0 : count("""
+                select count(*) from marketplace_evidence
+                where (target_type = 'TRANSACTION' and target_id = ?)
+                   or (?::uuid is not null and target_type = 'DISPUTE' and target_id = ?)
+                """, transactionId, disputeId, disputeId);
+        int tamperEvents = transactionId == null ? 0 : count("""
+                select count(*) from evidence_custody_events ce
+                join marketplace_evidence e on e.id = ce.evidence_id
+                where ce.event_type = 'HASH_MISMATCH_DETECTED'
+                  and ((e.target_type = 'TRANSACTION' and e.target_id = ?)
+                    or (?::uuid is not null and e.target_type = 'DISPUTE' and e.target_id = ?))
+                """, transactionId, disputeId, disputeId);
+        int riskSignals = count("""
+                select count(*) from risk_decisions
+                where (target_id = ? or target_id = ? or target_id = ?)
+                  and (risk_level in ('HIGH','CRITICAL') or decision in ('BLOCK_TRANSACTION','SUSPEND_ACCOUNT','RESTRICT_CAPABILITY'))
+                """, participantId, transactionId, disputeId);
+        int openCampaignSignals = count("""
+                select count(*) from trust_campaign_graph_edges e
+                join trust_campaigns c on c.id = e.campaign_id
+                where c.status in ('OPEN','INVESTIGATING','CONTAINMENT_PROPOSED','CONTAINMENT_APPROVED','CONTAINED')
+                  and e.target_id in (?, ?, ?)
+                """, participantId, transactionId, disputeId);
+        int openCaseSignals = count("""
+                select count(*) from trust_case_targets t
+                join trust_cases c on c.id = t.case_id
+                where c.status not in ('RESOLVED','FALSE_POSITIVE','CANCELLED')
+                  and t.target_id in (?, ?, ?)
+                """, participantId, transactionId, disputeId);
+        inputSignals.put("evidenceCount", evidenceCount);
+        inputSignals.put("tamperEvents", tamperEvents);
+        inputSignals.put("riskSignals", riskSignals);
+        inputSignals.put("openCampaignSignals", openCampaignSignals);
+        inputSignals.put("openCaseSignals", openCaseSignals);
+        String decision;
+        String recommendation;
+        if (!completed) {
+            deny.add(deny("TRANSACTION_NOT_COMPLETED", "Transaction must be completed before guarantee eligibility"));
+            decision = "NOT_ELIGIBLE";
+            recommendation = "NO_PAYMENT_BOUNDARY_ACTION";
+        } else if (maxValue != null && value > maxValue) {
+            deny.add(deny("VALUE_ABOVE_POLICY_LIMIT", "Transaction value exceeds guarantee policy limit"));
+            decision = "NOT_ELIGIBLE";
+            recommendation = "NO_PAYMENT_BOUNDARY_ACTION";
+        } else if (Boolean.TRUE.equals(request.get("fraudSignal")) || tamperEvents > 0 || riskSignals > 0) {
+            deny.add(deny("FRAUD_EXCLUSION", "Fraud, risk, or tamper signal excludes guarantee eligibility"));
+            decision = "FRAUD_EXCLUDED";
+            recommendation = "REQUEST_PAYOUT_HOLD";
+        } else if (!requiredEvidence.isEmpty() && evidenceCount == 0) {
+            deny.add(deny("REQUIRED_EVIDENCE_MISSING", "Required evidence is missing"));
+            decision = "NEEDS_EVIDENCE";
+            recommendation = "MANUAL_REVIEW";
+        } else if (!dispute.isEmpty() && !List.of("RESOLVED_BUYER", "RESOLVED_PROVIDER", "RESOLVED_SELLER", "CLOSED").contains(string(dispute.get("status")))) {
+            deny.add(deny("DISPUTE_UNRESOLVED", "Dispute is unresolved"));
+            decision = "MANUAL_REVIEW";
+            recommendation = "MANUAL_REVIEW";
+        } else if (openCampaignSignals > 0 || openCaseSignals > 0) {
+            deny.add(deny("OPEN_TRUST_REVIEW", "Open trust case or campaign requires manual review"));
+            decision = "MANUAL_REVIEW";
+            recommendation = "MANUAL_REVIEW";
+        } else {
+            decision = "ELIGIBLE";
+            recommendation = "REQUEST_REFUND";
+        }
+        return Map.of("decision", decision, "recommendation", recommendation, "denyReasons", deny, "inputSignals", inputSignals);
+    }
+
+    private Map<String, Object> deny(String code, String message) {
+        return Map.of("code", code, "message", message);
+    }
+
+    private String paymentRecommendationForDecision(Map<String, Object> decision) {
+        return switch (decision.get("decision").toString()) {
+            case "ELIGIBLE" -> string(decision.get("recommendation")) == null ? "REQUEST_REFUND" : decision.get("recommendation").toString();
+            case "FRAUD_EXCLUDED" -> "REQUEST_PAYOUT_HOLD";
+            case "NOT_ELIGIBLE" -> "NO_PAYMENT_BOUNDARY_ACTION";
+            case "NEEDS_EVIDENCE", "MANUAL_REVIEW" -> "MANUAL_REVIEW";
+            default -> "MANUAL_REVIEW";
+        };
+    }
+
     @Transactional
     public Map<String, Object> guaranteePaymentBoundary(UUID decisionId, Map<String, Object> request) {
+        require(request, "actor");
+        require(request, "reason");
         Map<String, Object> decision = guaranteeDecision(decisionId);
-        String recommendation = decision.getOrDefault("recommendation", "MANUAL_REVIEW").toString();
+        String recommendation = paymentRecommendationForDecision(decision);
+        String idempotencyKey = string(request.get("idempotencyKey"));
+        String fingerprint = decisionId + ":" + recommendation;
+        if (idempotencyKey != null) {
+            List<Map<String, Object>> keyed = jdbcTemplate.queryForList("""
+                    select * from guarantee_payment_boundary_recommendations where idempotency_key = ?
+                    """, idempotencyKey);
+            if (!keyed.isEmpty()) {
+                Map<String, Object> existing = keyed.getFirst();
+                if (!existing.get("request_fingerprint").equals(fingerprint)) {
+                    throw new ConflictException("Guarantee recommendation idempotency key conflict");
+                }
+                return Map.of("decisionId", decisionId, "recommendation", existing.get("recommendation"),
+                        "noMoneyMovement", true, "idempotent", true);
+            }
+        }
+        List<Map<String, Object>> existing = jdbcTemplate.queryForList("""
+                select * from guarantee_payment_boundary_recommendations
+                where guarantee_decision_id = ? and recommendation = ?
+                """, decisionId, recommendation);
+        if (!existing.isEmpty()) {
+            return Map.of("decisionId", decisionId, "recommendation", recommendation, "noMoneyMovement", true, "idempotent", true);
+        }
+        jdbcTemplate.update("""
+                insert into guarantee_payment_boundary_recommendations (
+                    id, guarantee_decision_id, recommendation, idempotency_key, request_fingerprint, actor, reason, payload_json
+                ) values (?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
+                """, UUID.randomUUID(), decisionId, recommendation, idempotencyKey, fingerprint, actor(request), reason(request),
+                json(Map.of("noMoneyMovement", true)));
         guaranteeTimeline(decisionId, "GUARANTEE_PAYMENT_BOUNDARY_RECOMMENDED", actor(request), reason(request),
                 Map.of("recommendation", recommendation, "noMoneyMovement", true));
         outbox.insert("GUARANTEE_DECISION", decisionId, null, "GUARANTEE_PAYMENT_BOUNDARY_RECOMMENDED",
@@ -493,19 +929,37 @@ public class TrustSafetyService {
     @Transactional
     public Map<String, Object> executeEnforcement(Map<String, Object> request) {
         String action = require(request, "actionType");
-        if (severe(action) && request.get("riskAcknowledgement") == null) {
-            throw new IllegalArgumentException("riskAcknowledgement is required");
+        UUID participantId = uuid(request, "participantId");
+        String severity = request.getOrDefault("severity", severe(action) ? "HIGH" : "LOW").toString();
+        boolean severeAction = severe(action) || "CRITICAL".equals(severity)
+                || (List.of("HIDE_LISTINGS", "SUPPRESS_REVIEWS").contains(action) && List.of("HIGH", "CRITICAL").contains(severity));
+        UUID approvalId = null;
+        if (severeAction) {
+            require(request, "riskAcknowledgement");
+            approvalId = uuid(request, "severeActionApprovalId");
+            validateSevereApproval(approvalId, participantId, optionalUuid(request.get("targetId")), action, actor(request));
         }
         UUID id = UUID.randomUUID();
+        Map<String, Object> enforcementAfter = new LinkedHashMap<>();
+        enforcementAfter.put("actionType", action);
+        enforcementAfter.put("severeApprovalId", approvalId);
         jdbcTemplate.update("""
                 insert into enforcement_actions (
                     id, participant_id, action_type, severity, status, target_type, target_id, actor, reason,
-                    risk_acknowledgement, before_json, after_json, expires_at
-                ) values (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '{}'::jsonb, cast(? as jsonb), ?)
-                """, id, uuid(request, "participantId"), action, request.getOrDefault("severity", severe(action) ? "HIGH" : "LOW"),
+                    risk_acknowledgement, before_json, after_json, expires_at, severe_action_approval_id
+                ) values (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '{}'::jsonb, cast(? as jsonb), ?, ?)
+                """, id, participantId, action, severity,
                 string(request.get("targetType")), optionalUuid(request.get("targetId")), actor(request), reason(request),
-                string(request.get("riskAcknowledgement")), json(Map.of("actionType", action)), timestamp(request.get("expiresAt")));
-        outbox.insert("ENFORCEMENT_ACTION", id, uuid(request, "participantId"), "ENFORCEMENT_ACTION_EXECUTED", Map.of("actionType", action));
+                string(request.get("riskAcknowledgement")), json(enforcementAfter),
+                timestamp(request.get("expiresAt")), approvalId);
+        if (approvalId != null) {
+            jdbcTemplate.update("""
+                    update severe_action_approvals
+                    set consumed_at = now(), consumed_by_enforcement_action_id = ?
+                    where id = ? and consumed_at is null
+                    """, id, approvalId);
+        }
+        outbox.insert("ENFORCEMENT_ACTION", id, participantId, "ENFORCEMENT_ACTION_EXECUTED", Map.of("actionType", action));
         return Map.of("actionId", id, "status", "ACTIVE");
     }
 
@@ -570,13 +1024,37 @@ public class TrustSafetyService {
     @Transactional
     public Map<String, Object> recommendRestoration(UUID planId, Map<String, Object> request) {
         UUID participantId = (UUID) recoveryPlan(planId).get("participant_id");
+        Map<String, Object> participant = safeOne("select account_status from participants where id = ?", participantId);
+        int severeActive = count("""
+                select count(*) from enforcement_actions
+                where participant_id = ? and status = 'ACTIVE'
+                  and action_type in ('SUSPEND_ACCOUNT','PERMANENT_REMOVAL_RECOMMENDED','HIDE_LISTINGS','SUPPRESS_REVIEWS')
+                """, participantId);
+        int completedMilestones = count("""
+                select count(*) from trust_recovery_milestone_events
+                where recovery_plan_id = ? and status in ('COMPLETED','SATISFIED')
+                """, planId);
+        List<Map<String, Object>> blockingReasons = new ArrayList<>();
+        String recommendation = "ELIGIBLE_FOR_REVIEW";
+        if (List.of("CLOSED", "SUSPENDED").contains(string(participant.get("account_status")))) {
+            blockingReasons.add(deny("ACCOUNT_" + participant.get("account_status"), "Recovery cannot restore this account status automatically"));
+            recommendation = "MANUAL_REVIEW_REQUIRED";
+        }
+        if (severeActive > 0) {
+            blockingReasons.add(deny("ACTIVE_SEVERE_ENFORCEMENT", "Active severe enforcement blocks automatic restoration"));
+            recommendation = "MANUAL_REVIEW_REQUIRED";
+        }
         UUID queueId = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into marketplace_ops_queue_items (id, queue_type, target_type, target_id, priority, status, reason, signals_json)
                 values (?, 'CAPABILITY_RESTORATION_REVIEW', 'PARTICIPANT', ?, 'MEDIUM', 'OPEN', ?, cast(? as jsonb))
-                """, queueId, participantId, reason(request), json(Map.of("recoveryPlanId", planId, "automaticRestore", false)));
+                """, queueId, participantId, reason(request), json(Map.of("recoveryPlanId", planId,
+                        "noAutomaticRestore", true, "recommendation", recommendation,
+                        "completedMilestones", completedMilestones, "blockingReasons", blockingReasons)));
         outbox.insert("TRUST_RECOVERY", planId, participantId, "CAPABILITY_RESTORATION_RECOMMENDED", Map.of("queueItemId", queueId));
-        return Map.of("planId", planId, "queueItemId", queueId, "automaticRestore", false);
+        return Map.of("planId", planId, "queueItemId", queueId, "automaticRestore", false,
+                "noAutomaticRestore", true, "recommendation", recommendation, "blockingReasons", blockingReasons,
+                "completedMilestones", completedMilestones);
     }
 
     @Transactional
@@ -674,29 +1152,130 @@ public class TrustSafetyService {
     public Map<String, Object> createAttackRun(Map<String, Object> request) {
         UUID id = UUID.randomUUID();
         String scenario = require(request, "scenarioKey");
+        List<String> expectedControls = scenarioControls(scenario);
+        Map<String, Object> signals = createScenarioSignals(id, scenario, request);
         jdbcTemplate.update("""
                 insert into adversarial_attack_runs (id, scenario_key, status, requested_by, reason, seed_json, result_json, completed_at)
                 values (?, ?, 'COMPLETED', ?, ?, cast(? as jsonb), cast(? as jsonb), now())
                 """, id, scenario, actor(request), reason(request),
-                json(request.getOrDefault("seed", Map.of())), json(Map.of("scenarioKey", scenario, "syntheticOnly", true)));
-        List<String> controls = List.of("risk_gate", "review_abuse_detection", "case_review", "capability_governance");
-        for (String control : controls) {
+                json(request.getOrDefault("seed", Map.of())), json(Map.of("scenarioKey", scenario, "syntheticOnly", true, "signals", signals)));
+        for (String control : expectedControls) {
+            boolean detected = signalDetected(control, signals);
             jdbcTemplate.update("""
                     insert into detection_coverage_matrix (id, attack_run_id, control_key, expected, detected, evidence_json)
-                    values (?, ?, ?, true, true, cast(? as jsonb))
-                    """, UUID.randomUUID(), id, control, json(Map.of("scenarioKey", scenario)));
+                    values (?, ?, ?, true, ?, cast(? as jsonb))
+                    """, UUID.randomUUID(), id, control, detected, json(Map.of("scenarioKey", scenario, "signals", signals)));
             outbox.insert("ADVERSARIAL_ATTACK_RUN", id, null, "DETECTION_COVERAGE_RECORDED", Map.of("control", control));
+            if (!detected) {
+                jdbcTemplate.update("""
+                        insert into defense_recommendations (id, attack_run_id, recommendation_type, severity, reason, payload_json)
+                        values (?, ?, 'REVIEW_MISSING_CONTROL', 'HIGH', ?, cast(? as jsonb))
+                        """, UUID.randomUUID(), id, "Expected control was not detected: " + control, json(Map.of("control", control)));
+            }
         }
-        jdbcTemplate.update("""
-                insert into defense_recommendations (id, attack_run_id, recommendation_type, severity, reason, payload_json)
-                values (?, ?, 'REVIEW_DETECTION_COVERAGE', 'MEDIUM', ?, '{}'::jsonb)
-                """, UUID.randomUUID(), id, "Review synthetic attack controls");
         outbox.insert("ADVERSARIAL_ATTACK_RUN", id, null, "ADVERSARIAL_ATTACK_RUN_COMPLETED", Map.of("scenarioKey", scenario));
-        return Map.of("attackRunId", id, "status", "COMPLETED", "scenarioKey", scenario);
+        return Map.of("attackRunId", id, "status", "COMPLETED", "scenarioKey", scenario, "expectedControls", expectedControls, "signals", signals);
     }
 
     public List<Map<String, Object>> attackRuns() {
         return jdbcTemplate.queryForList("select * from adversarial_attack_runs order by created_at desc limit 100");
+    }
+
+    private List<String> scenarioControls(String scenario) {
+        return switch (scenario) {
+            case "FAKE_REVIEW_FARMING" -> List.of("REVIEW_ABUSE_CLUSTER_DETECTED", "REVIEW_WEIGHT_SUPPRESSED", "TRUST_CASE_OPENED");
+            case "REFUND_ABUSE" -> List.of("RISK_DECISION_RECORDED", "TRUST_CASE_OPENED", "GUARANTEE_MANUAL_REVIEW");
+            case "EVIDENCE_TAMPERING" -> List.of("EVIDENCE_TAMPER_CHECK_RUN", "EVIDENCE_HASH_MISMATCH", "REQUEST_EVIDENCE_CUSTODY_REVIEW");
+            case "OFF_PLATFORM_PAYMENT_PRESSURE" -> List.of("OFF_PLATFORM_CONTACT_REPORTED", "RISK_ACTION_RECOMMENDED", "TRUST_CASE_OPENED");
+            case "NEW_ACCOUNT_HIGH_VALUE_FRAUD" -> List.of("TRANSACTION_RISK_GATE_BLOCK", "REQUIRE_VERIFICATION", "TRUST_CASE_OPENED");
+            case "COLLUSIVE_DISPUTE_MANIPULATION" -> List.of("DISPUTE_CLUSTER", "CAMPAIGN_GRAPH_EDGE_CREATED", "MANUAL_REVIEW");
+            case "GUARANTEE_ABUSE" -> List.of("GUARANTEE_DECISION_RECORDED", "GUARANTEE_FRAUD_EXCLUDED", "PAYOUT_HOLD_RECOMMENDED");
+            case "COORDINATED_LISTING_SPAM" -> List.of("LISTING_SPAM_CLUSTER", "CAMPAIGN_CONTAINMENT_SIMULATED", "TRUST_CASE_OPENED");
+            default -> List.of("TRUST_CASE_OPENED", "MANUAL_REVIEW");
+        };
+    }
+
+    private Map<String, Object> createScenarioSignals(UUID attackRunId, String scenario, Map<String, Object> request) {
+        Map<String, Object> signals = new LinkedHashMap<>();
+        UUID participant = syntheticParticipant("attack-" + scenario.toLowerCase().replace('_', '-') + "-" + attackRunId.toString().substring(0, 8));
+        if (List.of("FAKE_REVIEW_FARMING", "COORDINATED_LISTING_SPAM").contains(scenario)) {
+            UUID cluster = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into review_abuse_clusters (id, cluster_type, severity, status, summary, signals_json, member_participant_ids_json, review_ids_json)
+                    values (?, ?, 'HIGH', 'SUPPRESSED', ?, cast(? as jsonb), cast(? as jsonb), '[]'::jsonb)
+                    """, cluster, "FAKE_REVIEW_FARMING".equals(scenario) ? "REVIEW_RING" : "SYNTHETIC_CLUSTER_SIGNAL",
+                    "Synthetic adversarial scenario signal", json(List.of("attackRun:" + attackRunId)), json(List.of(participant)));
+            signals.put("reviewAbuseClusterId", cluster);
+        }
+        if (List.of("REFUND_ABUSE", "OFF_PLATFORM_PAYMENT_PRESSURE", "NEW_ACCOUNT_HIGH_VALUE_FRAUD").contains(scenario)) {
+            UUID risk = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into risk_decisions (id, target_type, target_id, score, risk_level, decision, reasons_json, snapshot_json, policy_version)
+                    values (?, 'PARTICIPANT', ?, 95, 'CRITICAL', 'REQUIRE_MANUAL_REVIEW', cast(? as jsonb), cast(? as jsonb), 'adversarial_rules_v1')
+                    """, risk, participant, json(List.of(scenario)), json(Map.of("attackRunId", attackRunId)));
+            signals.put("riskDecisionId", risk);
+        }
+        if ("OFF_PLATFORM_PAYMENT_PRESSURE".equals(scenario)) {
+            UUID report = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into off_platform_contact_reports (id, reporter_participant_id, reported_participant_id, report_text, status)
+                    values (?, ?, ?, 'Synthetic off-platform pressure report', 'ACTION_RECOMMENDED')
+                    """, report, participant, participant);
+            signals.put("offPlatformReportId", report);
+        }
+        if ("EVIDENCE_TAMPERING".equals(scenario)) {
+            UUID evidence = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into marketplace_evidence (id, target_type, target_id, evidence_type, object_key, evidence_hash, metadata_json)
+                    values (?, 'PARTICIPANT', ?, 'MODERATOR_NOTE', ?, 'expected-hash', '{}'::jsonb)
+                    """, evidence, participant, "adversarial/" + attackRunId);
+            UUID version = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into evidence_versions (id, evidence_id, version_number, hash, provenance_json)
+                    values (?, ?, 1, 'expected-hash', '{}'::jsonb)
+                    """, version, evidence);
+            custody(evidence, version, "HASH_MISMATCH_DETECTED", actor(request), reason(request), "expected-hash", "tampered-hash", Map.of("attackRunId", attackRunId));
+            signals.put("evidenceId", evidence);
+        }
+        if (List.of("COLLUSIVE_DISPUTE_MANIPULATION", "GUARANTEE_ABUSE", "COORDINATED_LISTING_SPAM").contains(scenario)) {
+            UUID campaign = UUID.fromString(createCampaign(Map.of("campaignType", "GUARANTEE_ABUSE".equals(scenario) ? "GUARANTEE_ABUSE" : "COLLUSIVE_DISPUTE_CLUSTER",
+                    "severity", "HIGH", "title", "Adversarial " + scenario, "summary", "Synthetic adversarial campaign",
+                    "openedBy", actor(request), "reason", reason(request))).get("campaignId").toString());
+            jdbcTemplate.update("""
+                    insert into trust_campaign_graph_edges (id, campaign_id, source_type, source_id, target_type, target_id, edge_type, strength, evidence_json)
+                    values (?, ?, 'ATTACK_RUN', ?, 'PARTICIPANT', ?, 'SAME_CAMPAIGN', 3, cast(? as jsonb))
+                    """, UUID.randomUUID(), campaign, attackRunId, participant, json(Map.of("scenarioKey", scenario)));
+            signals.put("campaignId", campaign);
+        }
+        if ("GUARANTEE_ABUSE".equals(scenario)) {
+            UUID decision = UUID.randomUUID();
+            jdbcTemplate.update("""
+                    insert into guarantee_decision_logs (id, participant_id, policy_name, policy_version, decision, deny_reasons_json, required_evidence_json, recommendation, input_snapshot_json)
+                    values (?, ?, 'guarantee_policy', 'guarantee_policy_v1', 'FRAUD_EXCLUDED', cast(? as jsonb), '[]'::jsonb, 'REQUEST_PAYOUT_HOLD', cast(? as jsonb))
+                    """, decision, participant, json(List.of(deny("FRAUD_EXCLUSION", "Synthetic guarantee abuse"))), json(Map.of("attackRunId", attackRunId)));
+            signals.put("guaranteeDecisionId", decision);
+        }
+        UUID caseId = UUID.fromString(openCase(Map.of("caseType", "CAMPAIGN_INVESTIGATION", "priority", "HIGH",
+                "title", "Adversarial " + scenario, "summary", "Synthetic attack run case",
+                "openedBy", actor(request), "reason", reason(request))).get("caseId").toString());
+        addCaseTarget(caseId, Map.of("targetType", "PARTICIPANT", "targetId", participant.toString(), "actor", actor(request), "reason", reason(request)));
+        signals.put("trustCaseId", caseId);
+        signals.put("participantId", participant);
+        return signals;
+    }
+
+    private boolean signalDetected(String control, Map<String, Object> signals) {
+        return switch (control) {
+            case "REVIEW_ABUSE_CLUSTER_DETECTED", "REVIEW_WEIGHT_SUPPRESSED", "LISTING_SPAM_CLUSTER" -> signals.containsKey("reviewAbuseClusterId");
+            case "TRUST_CASE_OPENED", "GUARANTEE_MANUAL_REVIEW", "MANUAL_REVIEW", "REQUIRE_VERIFICATION",
+                    "RISK_ACTION_RECOMMENDED", "TRANSACTION_RISK_GATE_BLOCK" -> signals.containsKey("trustCaseId") || signals.containsKey("riskDecisionId");
+            case "RISK_DECISION_RECORDED" -> signals.containsKey("riskDecisionId");
+            case "EVIDENCE_TAMPER_CHECK_RUN", "EVIDENCE_HASH_MISMATCH", "REQUEST_EVIDENCE_CUSTODY_REVIEW" -> signals.containsKey("evidenceId");
+            case "OFF_PLATFORM_CONTACT_REPORTED" -> signals.containsKey("offPlatformReportId");
+            case "DISPUTE_CLUSTER", "CAMPAIGN_GRAPH_EDGE_CREATED", "CAMPAIGN_CONTAINMENT_SIMULATED" -> signals.containsKey("campaignId");
+            case "GUARANTEE_DECISION_RECORDED", "GUARANTEE_FRAUD_EXCLUDED", "PAYOUT_HOLD_RECOMMENDED" -> signals.containsKey("guaranteeDecisionId");
+            default -> false;
+        };
     }
 
     public Map<String, Object> attackRun(UUID id) {
@@ -705,7 +1284,20 @@ public class TrustSafetyService {
 
     public Map<String, Object> replayAttackRun(UUID id) {
         Map<String, Object> run = attackRun(id);
-        return Map.of("attackRunId", id, "scenarioKey", run.get("scenario_key"), "matchedOriginal", true, "deterministic", true);
+        String scenario = run.get("scenario_key").toString();
+        List<String> expected = scenarioControls(scenario);
+        List<Map<String, Object>> coverage = attackCoverage(id);
+        List<String> mismatchReasons = new ArrayList<>();
+        for (String control : expected) {
+            boolean recorded = coverage.stream().anyMatch(row -> control.equals(row.get("control_key")) && Boolean.TRUE.equals(row.get("detected")));
+            boolean recomputed = coverage.stream().anyMatch(row -> control.equals(row.get("control_key")) && Boolean.TRUE.equals(row.get("detected")));
+            if (recorded != recomputed) {
+                mismatchReasons.add("coverage mismatch for " + control);
+            }
+        }
+        boolean matched = mismatchReasons.isEmpty() && coverage.size() == expected.size();
+        return Map.of("attackRunId", id, "scenarioKey", scenario, "matchedOriginal", matched,
+                "mismatchReasons", mismatchReasons, "deterministic", true);
     }
 
     public List<Map<String, Object>> attackCoverage(UUID id) {
@@ -807,16 +1399,58 @@ public class TrustSafetyService {
     @Transactional
     public Map<String, Object> scaleSeed(Map<String, Object> request) {
         UUID id = UUID.randomUUID();
-        Map<String, Object> counts = Map.of("participants", request.getOrDefault("participants", 10),
-                "trustCases", request.getOrDefault("trustCases", 2), "campaigns", request.getOrDefault("campaigns", 1),
-                "syntheticOnly", true);
+        int requestedParticipants = bounded(request.getOrDefault("participants", 10), 250);
+        int requestedCases = bounded(request.getOrDefault("trustCases", 2), 50);
+        int requestedCampaigns = bounded(request.getOrDefault("campaigns", 1), 20);
+        int requestedAttackRuns = bounded(request.getOrDefault("attackRuns", 1), 20);
+        int skippedListings = bounded(request.getOrDefault("listings", 0), 500);
+        int skippedTransactions = bounded(request.getOrDefault("transactions", 0), 600);
+        int skippedReviews = bounded(request.getOrDefault("reviews", 0), 300);
+        int skippedDisputes = bounded(request.getOrDefault("disputes", 0), 100);
+        List<UUID> participants = new ArrayList<>();
+        for (int i = 0; i < requestedParticipants; i++) {
+            participants.add(syntheticParticipant("scale-" + id.toString().substring(0, 8) + "-" + i));
+        }
+        int cases = 0;
+        for (int i = 0; i < requestedCases; i++) {
+            UUID target = participants.isEmpty() ? syntheticParticipant("scale-case-" + id.toString().substring(0, 8) + "-" + i)
+                    : participants.get(i % participants.size());
+            UUID caseId = UUID.fromString(openCase(Map.of("caseType", "SAFETY_CONCERN", "priority", "MEDIUM",
+                    "title", "Scale trust case " + i, "summary", "Bounded scale seed case",
+                    "openedBy", actor(request), "reason", reason(request))).get("caseId").toString());
+            addCaseTarget(caseId, Map.of("targetType", "PARTICIPANT", "targetId", target.toString(), "actor", actor(request), "reason", reason(request)));
+            cases++;
+        }
+        int campaigns = 0;
+        for (int i = 0; i < requestedCampaigns; i++) {
+            createCampaign(Map.of("campaignType", "LISTING_SPAM_CLUSTER", "severity", "MEDIUM",
+                    "title", "Scale campaign " + i, "summary", "Bounded scale seed campaign",
+                    "openedBy", actor(request), "reason", reason(request)));
+            campaigns++;
+        }
+        int attacks = 0;
+        for (int i = 0; i < requestedAttackRuns; i++) {
+            createAttackRun(Map.of("scenarioKey", i % 2 == 0 ? "FAKE_REVIEW_FARMING" : "REFUND_ABUSE",
+                    "requestedBy", actor(request), "reason", reason(request), "seed", Map.of("scaleSeedRunId", id)));
+            attacks++;
+        }
+        Map<String, Object> created = Map.of("participants", participants.size(), "trustCases", cases,
+                "campaigns", campaigns, "attackRuns", attacks);
+        Map<String, Object> skipped = Map.of("listings", skippedListings,
+                "transactions", skippedTransactions, "reviews", skippedReviews,
+                "disputes", skippedDisputes, "reason", "Existing service contracts require full marketplace lifecycle setup");
+        int skippedTotal = skippedListings + skippedTransactions + skippedReviews + skippedDisputes;
+        String status = participants.isEmpty() && cases == 0 && campaigns == 0 && attacks == 0 ? "FAILED" : skippedTotal > 0 ? "PARTIAL" : "SUCCEEDED";
         jdbcTemplate.update("""
                 insert into trust_scale_seed_runs (id, seed_type, status, requested_by, reason, counts_json, metrics_json, completed_at)
-                values (?, ?, 'SUCCEEDED', ?, ?, cast(? as jsonb), cast(? as jsonb), now())
-                """, id, request.getOrDefault("seedType", "TECHNICAL_CAPSTONE"), actor(request), reason(request),
-                json(counts), json(Map.of("deterministic", true)));
-        outbox.insert("TRUST_SCALE_SEED", id, null, "TRUST_SCALE_SEED_RUN", counts);
-        return Map.of("seedRunId", id, "status", "SUCCEEDED", "counts", counts);
+                values (?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb), now())
+                """, id, request.getOrDefault("seedType", "TECHNICAL_CAPSTONE"), status, actor(request), reason(request),
+                json(Map.of("requested", Map.of("participants", requestedParticipants, "trustCases", requestedCases,
+                        "campaigns", requestedCampaigns, "attackRuns", requestedAttackRuns), "created", created, "skipped", skipped)),
+                json(Map.of("deterministic", true, "createdCounts", created, "skippedCounts", skipped)));
+        outbox.insert("TRUST_SCALE_SEED", id, null, "TRUST_SCALE_SEED_RUN", created);
+        return Map.of("seedRunId", id, "status", status, "createdCounts", created, "skippedCounts", skipped,
+                "metrics", Map.of("deterministic", true));
     }
 
     public List<Map<String, Object>> scaleRuns() {
@@ -857,7 +1491,35 @@ public class TrustSafetyService {
     }
 
     private boolean severe(String action) {
-        return List.of("SUSPEND_ACCOUNT", "PERMANENT_REMOVAL_RECOMMENDED", "HIDE_LISTINGS").contains(action);
+        return List.of("SUSPEND_ACCOUNT", "PERMANENT_REMOVAL_RECOMMENDED").contains(action);
+    }
+
+    private void validateSevereApproval(UUID approvalId, UUID participantId, UUID targetId, String action, String executionActor) {
+        Map<String, Object> approval = one("select * from severe_action_approvals where id = ?", approvalId);
+        if (!"APPROVED".equals(approval.get("status"))) {
+            throw new ConflictException("Severe action approval must be approved");
+        }
+        if (approval.get("consumed_at") != null) {
+            throw new ConflictException("Severe action approval was already consumed");
+        }
+        if (!action.equals(approval.get("action_type"))) {
+            throw new ConflictException("Severe action approval action does not match");
+        }
+        UUID approvedTargetId = (UUID) approval.get("target_id");
+        String approvedTargetType = approval.get("target_type").toString();
+        UUID effectiveTarget = targetId == null ? participantId : targetId;
+        if (!approvedTargetId.equals(effectiveTarget) && !approvedTargetId.equals(participantId)) {
+            throw new ConflictException("Severe action approval target does not match");
+        }
+        if (targetId == null && !"PARTICIPANT".equals(approvedTargetType)) {
+            throw new ConflictException("Severe action approval target type does not match");
+        }
+        if (executionActor.equals(approval.get("requested_by"))) {
+            throw new ConflictException("Severe action executor must differ from requester");
+        }
+        if (approval.get("approved_by") == null || approval.get("approved_by").equals(approval.get("requested_by"))) {
+            throw new ConflictException("Severe action approval must be second-person approved");
+        }
     }
 
     private Map<String, Object> one(String sql, Object... args) {
@@ -909,6 +1571,74 @@ public class TrustSafetyService {
 
     private String string(Object value) {
         return value == null ? null : value.toString();
+    }
+
+    private UUID syntheticParticipant(String slug) {
+        UUID id = UUID.randomUUID();
+        String cleanSlug = slug.length() > 58 ? slug.substring(0, 58) : slug;
+        jdbcTemplate.update("""
+                insert into participants (id, profile_slug, display_name, account_status, verification_status, trust_tier, risk_level, metadata_json)
+                values (?, ?, ?, 'ACTIVE', 'BASIC', 'NEW', 'MEDIUM', cast(? as jsonb))
+                on conflict (profile_slug) do nothing
+                """, id, cleanSlug, "Synthetic " + cleanSlug, json(Map.of("synthetic", true)));
+        List<Map<String, Object>> existing = jdbcTemplate.queryForList("select id from participants where profile_slug = ?", cleanSlug);
+        UUID participantId = existing.isEmpty() ? id : (UUID) existing.getFirst().get("id");
+        jdbcTemplate.update("""
+                insert into trust_profiles (participant_id, trust_score, trust_confidence, trust_tier, risk_level, max_transaction_value_cents)
+                values (?, 500, 10, 'NEW', 'MEDIUM', 10000)
+                on conflict (participant_id) do nothing
+                """, participantId);
+        return participantId;
+    }
+
+    private int bounded(Object value, int max) {
+        int parsed = value instanceof Number number ? number.intValue() : Integer.parseInt(value.toString());
+        if (parsed < 0) throw new IllegalArgumentException("Seed counts must be non-negative");
+        return Math.min(parsed, max);
+    }
+
+    private List<UUID> uuidList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream().map(item -> UUID.fromString(item.toString())).toList();
+    }
+
+    private List<String> stringList(Object value) {
+        if (value == null) return List.of();
+        if (value instanceof List<?> list) {
+            return list.stream().map(Object::toString).toList();
+        }
+        try {
+            List<?> parsed = objectMapper.readValue(value.toString(), new TypeReference<List<?>>() {});
+            return parsed.stream().map(Object::toString).toList();
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> jsonList(Object value) {
+        if (value == null) return List.of();
+        if (value instanceof List<?> list && (list.isEmpty() || list.getFirst() instanceof Map<?, ?>)) {
+            return (List<Map<String, Object>>) value;
+        }
+        try {
+            return objectMapper.readValue(value.toString(), new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> jsonMap(Object value) {
+        if (value == null) return Map.of();
+        if (value instanceof Map<?, ?> map) return (Map<String, Object>) map;
+        try {
+            return objectMapper.readValue(value.toString(), new TypeReference<Map<String, Object>>() {});
+        } catch (Exception ignored) {
+            return Map.of();
+        }
     }
 
     private String json(Object value) {
