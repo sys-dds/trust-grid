@@ -30,6 +30,11 @@ public class DataRepairRepository {
                          when f.finding_type = 'SEARCH_INDEX_DRIFT' then 'REBUILD_SEARCH_INDEX'
                          when f.finding_type = 'EVIDENCE_REFERENCE_INVALID' then 'MARK_EVIDENCE_REFERENCE_INVALID'
                          when f.finding_type = 'ANALYTICS_MISSING_EVENT' then 'REPLAY_EVENTS'
+                         when f.finding_type = 'EXPIRED_TEMPORARY_GRANT_STILL_ACTIVE' then 'EXPIRE_TEMPORARY_CAPABILITY_GRANT'
+                         when f.finding_type = 'EXPIRED_BREAK_GLASS_STILL_ACTIVE' then 'EXPIRE_BREAK_GLASS_CAPABILITY_ACTION'
+                         when f.finding_type = 'CAPABILITY_DECISION_REPLAY_MISMATCH' then 'REQUEST_CAPABILITY_DECISION_REVIEW'
+                         when f.finding_type = 'ACTIVE_GRANT_FOR_CLOSED_PARTICIPANT' then 'REVOKE_GRANT_FOR_CLOSED_PARTICIPANT'
+                         when f.finding_type = 'ACTIVE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT' then 'REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT'
                          else 'REQUEST_OPERATOR_REVIEW'
                        end,
                        f.target_type, f.target_id, f.severity,
@@ -130,6 +135,11 @@ public class DataRepairRepository {
             case "REBUILD_SEARCH_INDEX" -> "APPLY_REBUILD_SEARCH_INDEX";
             case "REBUILD_LINEAGE" -> "APPLY_REBUILD_LINEAGE";
             case "MANUAL_REPAIR_REQUIRED", "REQUEST_OPERATOR_REVIEW" -> "RECORD_MANUAL_REPAIR";
+            case "EXPIRE_TEMPORARY_CAPABILITY_GRANT" -> "EXPIRE_TEMPORARY_CAPABILITY_GRANT";
+            case "EXPIRE_BREAK_GLASS_CAPABILITY_ACTION" -> "EXPIRE_BREAK_GLASS_CAPABILITY_ACTION";
+            case "REQUEST_CAPABILITY_DECISION_REVIEW" -> "REQUEST_CAPABILITY_DECISION_REVIEW";
+            case "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT" -> "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT";
+            case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT";
             default -> "MARK_FINDING_RESOLVED";
         };
     }
@@ -144,6 +154,11 @@ public class DataRepairRepository {
             case "REPLAY_EVENTS" -> replayEvents();
             case "MARK_EVIDENCE_REFERENCE_INVALID" -> markEvidenceReferenceInvalid(targetId);
             case "REQUEST_OPERATOR_REVIEW" -> requestOperatorReview(recommendation, request);
+            case "EXPIRE_TEMPORARY_CAPABILITY_GRANT" -> expireTemporaryGrant(targetId);
+            case "EXPIRE_BREAK_GLASS_CAPABILITY_ACTION" -> expireBreakGlass(targetId);
+            case "REQUEST_CAPABILITY_DECISION_REVIEW" -> requestOperatorReview(recommendation, request);
+            case "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT" -> revokeGrantForClosedParticipant(targetId, request);
+            case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> revokeBreakGlassForClosedParticipant(targetId, request);
             case "MANUAL_REPAIR_REQUIRED" -> Map.of("repairExecuted", "MANUAL_REPAIR_RECORDED", "autoRepair", false);
             default -> Map.of("repairExecuted", "MARK_FINDING_RESOLVED", "autoRepair", false);
         };
@@ -264,6 +279,56 @@ public class DataRepairRepository {
                 """, queueId, recommendation.get("target_type"), recommendation.get("target_id"),
                 require(request, "reason"), json(Map.of("repairRecommendationId", recommendation.get("id"))));
         return Map.of("repairExecuted", "REQUEST_OPERATOR_REVIEW", "queueItemId", queueId);
+    }
+
+    private Map<String, Object> expireTemporaryGrant(UUID targetId) {
+        int updated = jdbcTemplate.update("""
+                update temporary_capability_grants
+                set status = 'EXPIRED'
+                where id = ? and status = 'ACTIVE' and expires_at <= now()
+                """, targetId);
+        if (updated == 0) {
+            throw new ConflictException("Temporary capability grant was not eligible for expiry repair");
+        }
+        return Map.of("repairExecuted", "EXPIRE_TEMPORARY_CAPABILITY_GRANT", "rowsUpdated", updated);
+    }
+
+    private Map<String, Object> expireBreakGlass(UUID targetId) {
+        int updated = jdbcTemplate.update("""
+                update break_glass_capability_actions
+                set status = 'EXPIRED'
+                where id = ? and status = 'ACTIVE' and expires_at <= now()
+                """, targetId);
+        if (updated == 0) {
+            throw new ConflictException("Break-glass capability action was not eligible for expiry repair");
+        }
+        return Map.of("repairExecuted", "EXPIRE_BREAK_GLASS_CAPABILITY_ACTION", "rowsUpdated", updated);
+    }
+
+    private Map<String, Object> revokeGrantForClosedParticipant(UUID targetId, Map<String, Object> request) {
+        int updated = jdbcTemplate.update("""
+                update temporary_capability_grants g
+                set status = 'REVOKED', revoked_at = now(), revoked_by = ?, revoke_reason = ?
+                from participants p
+                where g.id = ? and g.participant_id = p.id and p.account_status = 'CLOSED' and g.status = 'ACTIVE'
+                """, require(request, "actor"), require(request, "reason"), targetId);
+        if (updated == 0) {
+            throw new ConflictException("Temporary capability grant was not eligible for closed-account revoke repair");
+        }
+        return Map.of("repairExecuted", "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT", "rowsUpdated", updated);
+    }
+
+    private Map<String, Object> revokeBreakGlassForClosedParticipant(UUID targetId, Map<String, Object> request) {
+        int updated = jdbcTemplate.update("""
+                update break_glass_capability_actions b
+                set status = 'REVOKED', revoked_at = now(), revoked_by = ?, revoke_reason = ?
+                from participants p
+                where b.id = ? and b.participant_id = p.id and p.account_status = 'CLOSED' and b.status = 'ACTIVE'
+                """, require(request, "actor"), require(request, "reason"), targetId);
+        if (updated == 0) {
+            throw new ConflictException("Break-glass capability action was not eligible for closed-account revoke repair");
+        }
+        return Map.of("repairExecuted", "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT", "rowsUpdated", updated);
     }
 
     private int count(String sql, Object... args) {

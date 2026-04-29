@@ -27,6 +27,13 @@ class BreakGlassGovernanceIntegrationTest extends Tg221To240IntegrationTestSuppo
         Map<?, ?> unrelatedAction = simulateCapability(seller, "ACCEPT_TRANSACTION", null, null, 2000L);
         assertThat(unrelatedAction.get("decision")).isNotEqualTo("ALLOW_WITH_BREAK_GLASS");
 
+        Flow openFlow = createDisputableServiceFlow("break-glass-payment");
+        breakGlass(openFlow.providerId(), "REQUEST_PAYMENT_RELEASE", "TRANSACTION", openFlow.transactionId(), future());
+        Map<?, ?> paymentRelease = simulateCapability(openFlow.providerId(), "REQUEST_PAYMENT_RELEASE",
+                "TRANSACTION", openFlow.transactionId(), 2500L);
+        assertThat(paymentRelease.get("decision")).isNotEqualTo("ALLOW_WITH_BREAK_GLASS");
+        assertThat(paymentRelease.toString()).contains("TRANSACTION_NOT_COMPLETED");
+
         post("/api/v1/capability-governance/break-glass/" + override + "/revoke",
                 Map.of("actor", "senior-operator@example.com", "reason", "Emergency ended"), null);
         assertThat(simulateCapability(seller, "PUBLISH_LISTING", "LISTING", listing, 2000L).get("decision"))

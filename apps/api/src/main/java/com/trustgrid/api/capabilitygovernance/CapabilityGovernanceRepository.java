@@ -19,6 +19,8 @@ import org.springframework.stereotype.Repository;
 public class CapabilityGovernanceRepository {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
+    private static final TypeReference<List<Map<String, Object>>> LIST_TYPE = new TypeReference<>() {
+    };
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -121,6 +123,23 @@ public class CapabilityGovernanceRepository {
                 """, id, participantId, actionName, targetType, targetId, decision, policyName, policyVersion,
                 json(denyReasons), json(nextSteps), json(inputSnapshot));
         return id;
+    }
+
+    Map<String, Object> decision(UUID id) {
+        return jdbcTemplate.queryForList("select * from capability_decision_logs where id = ?", id).stream()
+                .findFirst()
+                .orElseThrow(() -> new NotFoundException("Capability decision not found"));
+    }
+
+    List<UUID> candidateParticipants(List<?> requestedIds) {
+        if (requestedIds != null && !requestedIds.isEmpty()) {
+            return requestedIds.stream()
+                    .map(Object::toString)
+                    .map(UUID::fromString)
+                    .limit(100)
+                    .toList();
+        }
+        return jdbcTemplate.queryForList("select id from participants order by created_at desc limit 100", UUID.class);
     }
 
     UUID createTemporaryGrant(Map<String, Object> request) {
@@ -227,6 +246,93 @@ public class CapabilityGovernanceRepository {
                 """, participantId);
     }
 
+    Map<String, Object> auditBundle(UUID participantId) {
+        Map<String, Object> bundle = new LinkedHashMap<>();
+        bundle.put("participant", participant(participantId));
+        bundle.put("activeCapabilities", activeCapabilities(participantId));
+        bundle.put("activeRestrictions", activeRestrictions(participantId));
+        bundle.put("recentCapabilityDecisions", jdbcTemplate.queryForList("""
+                select * from capability_decision_logs
+                where participant_id = ?
+                order by created_at desc limit 25
+                """, participantId));
+        bundle.put("temporaryGrants", jdbcTemplate.queryForList("""
+                select * from temporary_capability_grants
+                where participant_id = ?
+                order by created_at desc limit 25
+                """, participantId));
+        bundle.put("breakGlassActions", jdbcTemplate.queryForList("""
+                select * from break_glass_capability_actions
+                where participant_id = ?
+                order by created_at desc limit 25
+                """, participantId));
+        bundle.put("governanceTimeline", timeline(participantId));
+        bundle.put("relatedMarketplaceEvents", jdbcTemplate.queryForList("""
+                select * from marketplace_events
+                where participant_id = ? and event_type in (
+                    'CAPABILITY_POLICY_CREATED', 'CAPABILITY_SIMULATED', 'CAPABILITY_DECISION_LOGGED',
+                    'CAPABILITY_DECISION_REPLAYED', 'CAPABILITY_BLAST_RADIUS_PREVIEWED',
+                    'TEMPORARY_CAPABILITY_GRANT_CREATED', 'TEMPORARY_CAPABILITY_GRANT_REVOKED',
+                    'TEMPORARY_CAPABILITY_GRANT_EXPIRED', 'BREAK_GLASS_CAPABILITY_CREATED',
+                    'BREAK_GLASS_CAPABILITY_REVOKED', 'BREAK_GLASS_CAPABILITY_EXPIRED'
+                )
+                order by created_at desc limit 50
+                """, participantId));
+        bundle.put("consistencyFindings", jdbcTemplate.queryForList("""
+                select * from consistency_findings
+                where target_id = ? and (
+                    target_type in ('PARTICIPANT', 'TEMPORARY_CAPABILITY_GRANT', 'BREAK_GLASS_CAPABILITY_ACTION')
+                    or finding_type like 'CAPABILITY_%' or finding_type like 'EXPIRED_%' or finding_type like 'ACTIVE_%'
+                )
+                order by created_at desc limit 25
+                """, participantId));
+        bundle.put("repairRecommendations", jdbcTemplate.queryForList("""
+                select r.* from data_repair_recommendations r
+                left join consistency_findings f on f.id = r.consistency_finding_id
+                where r.target_id = ? or f.target_id = ?
+                order by r.created_at desc limit 25
+                """, participantId, participantId));
+        bundle.put("scope", "participant_capability_governance");
+        return bundle;
+    }
+
+    Map<String, Object> dashboard() {
+        Map<String, Object> dashboard = new LinkedHashMap<>();
+        dashboard.put("policiesEnabled", count("select count(*) from marketplace_capability_policies where enabled = true"));
+        dashboard.put("decisionsLast24h", count("select count(*) from capability_decision_logs where created_at >= now() - interval '24 hours'"));
+        dashboard.put("deniedLast24h", count("select count(*) from capability_decision_logs where created_at >= now() - interval '24 hours' and decision in ('DENY','REQUIRE_VERIFICATION','REQUIRE_EVIDENCE','REQUIRE_MANUAL_REVIEW')"));
+        dashboard.put("temporaryGrantsActive", count("select count(*) from temporary_capability_grants where status = 'ACTIVE' and expires_at > now()"));
+        dashboard.put("temporaryGrantsExpiredButNotMarked", count("select count(*) from temporary_capability_grants where status = 'ACTIVE' and expires_at <= now()"));
+        dashboard.put("breakGlassActive", count("select count(*) from break_glass_capability_actions where status = 'ACTIVE' and expires_at > now()"));
+        dashboard.put("breakGlassExpiredButNotMarked", count("select count(*) from break_glass_capability_actions where status = 'ACTIVE' and expires_at <= now()"));
+        dashboard.put("topDeniedActions", jdbcTemplate.queryForList("""
+                select action_name, count(*) as count from capability_decision_logs
+                where created_at >= now() - interval '24 hours' and decision <> 'ALLOW'
+                group by action_name order by count desc limit 10
+                """));
+        dashboard.put("topDenyReasons", jdbcTemplate.queryForList("""
+                select reason->>'code' as code, count(*) as count
+                from capability_decision_logs, jsonb_array_elements(deny_reasons_json) reason
+                where created_at >= now() - interval '24 hours'
+                group by reason->>'code' order by count desc limit 10
+                """));
+        dashboard.put("participantsWithActiveRestrictions", count("select count(distinct participant_id) from participant_restrictions where status = 'ACTIVE'"));
+        dashboard.put("capabilityGovernanceOpenConsistencyFindings", count("""
+                select count(*) from consistency_findings
+                where status = 'OPEN' and (finding_type like 'CAPABILITY_%' or finding_type like 'EXPIRED_%' or finding_type like 'ACTIVE_%')
+                """));
+        dashboard.put("capabilityGovernanceOpenRepairRecommendations", count("""
+                select count(*) from data_repair_recommendations
+                where status in ('PROPOSED','APPROVED') and repair_type in (
+                    'EXPIRE_TEMPORARY_CAPABILITY_GRANT','EXPIRE_BREAK_GLASS_CAPABILITY_ACTION',
+                    'REQUEST_CAPABILITY_DECISION_REVIEW','REVOKE_GRANT_FOR_CLOSED_PARTICIPANT',
+                    'REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT'
+                )
+                """));
+        dashboard.put("deterministic", true);
+        return dashboard;
+    }
+
     Map<String, Object> targetSnapshot(String targetType, UUID targetId) {
         if (targetType == null || targetId == null) {
             return Map.of();
@@ -302,6 +408,19 @@ public class CapabilityGovernanceRepository {
         } catch (Exception exception) {
             return Map.of();
         }
+    }
+
+    List<Map<String, Object>> readList(String value) {
+        try {
+            return objectMapper.readValue(value, LIST_TYPE);
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    int count(String sql, Object... args) {
+        Integer value = jdbcTemplate.queryForObject(sql, Integer.class, args);
+        return value == null ? 0 : value;
     }
 
     String json(Object value) {

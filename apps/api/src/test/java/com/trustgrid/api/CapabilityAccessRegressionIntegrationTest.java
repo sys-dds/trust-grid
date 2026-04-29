@@ -59,5 +59,13 @@ class CapabilityAccessRegressionIntegrationTest extends Tg221To240IntegrationTes
         breakGlass(restricted, "ACCEPT_TRANSACTION", null, null, future());
         assertThat(simulateCapability(restricted, "ACCEPT_TRANSACTION", null, null, 1000L).get("decision"))
                 .isEqualTo("ALLOW_WITH_BREAK_GLASS");
+
+        Flow open = createDisputableServiceFlow("access-release");
+        assertThat(simulateCapability(open.providerId(), "REQUEST_PAYMENT_RELEASE", "TRANSACTION",
+                open.transactionId(), 2500L).toString()).contains("TRANSACTION_NOT_COMPLETED");
+        Flow disputed = createCompletedServiceFlow("access-disputed-release");
+        openDispute(disputed, "access-release-dispute-" + suffix());
+        assertThat(simulateCapability(disputed.providerId(), "REQUEST_PAYMENT_RELEASE", "TRANSACTION",
+                disputed.transactionId(), 2500L).toString()).contains("DISPUTE_UNRESOLVED");
     }
 }

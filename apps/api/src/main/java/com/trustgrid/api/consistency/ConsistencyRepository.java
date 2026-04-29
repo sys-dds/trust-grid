@@ -107,12 +107,46 @@ public class ConsistencyRepository {
     }
 
     int capability() {
-        return insertFindings("""
+        int findings = insertFindings("""
                 select pc.participant_id as target_id, 'Suspended or closed participant has active capability' as message
                 from participant_capabilities pc
                 join participants p on p.id = pc.participant_id
                 where p.account_status in ('SUSPENDED','CLOSED') and pc.status = 'ACTIVE'
                 """, "CAPABILITY_INCONSISTENT", "PARTICIPANT", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Active temporary capability grant is past expiry' as message
+                from temporary_capability_grants
+                where status = 'ACTIVE' and expires_at <= now()
+                """, "EXPIRED_TEMPORARY_GRANT_STILL_ACTIVE", "TEMPORARY_CAPABILITY_GRANT", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Active break-glass capability action is past expiry' as message
+                from break_glass_capability_actions
+                where status = 'ACTIVE' and expires_at <= now()
+                """, "EXPIRED_BREAK_GLASS_STILL_ACTIVE", "BREAK_GLASS_CAPABILITY_ACTION", "HIGH");
+        findings += insertFindings("""
+                select d.id as target_id, 'Capability decision replay marker indicates mismatch review is required' as message
+                from capability_decision_logs d
+                where d.input_snapshot_json->>'forceReplayMismatch' = 'true'
+                """, "CAPABILITY_DECISION_REPLAY_MISMATCH", "CAPABILITY_DECISION", "MEDIUM");
+        findings += insertFindings("""
+                select t.id as target_id, 'Capability governance timeline references a missing participant' as message
+                from capability_governance_timeline_events t
+                left join participants p on p.id = t.participant_id
+                where p.id is null
+                """, "CAPABILITY_TIMELINE_TARGET_MISSING", "CAPABILITY_GOVERNANCE_TIMELINE", "HIGH");
+        findings += insertFindings("""
+                select g.id as target_id, 'Active temporary capability grant exists for a closed participant' as message
+                from temporary_capability_grants g
+                join participants p on p.id = g.participant_id
+                where g.status = 'ACTIVE' and p.account_status = 'CLOSED'
+                """, "ACTIVE_GRANT_FOR_CLOSED_PARTICIPANT", "TEMPORARY_CAPABILITY_GRANT", "HIGH");
+        findings += insertFindings("""
+                select b.id as target_id, 'Active break-glass capability action exists for a closed participant' as message
+                from break_glass_capability_actions b
+                join participants p on p.id = b.participant_id
+                where b.status = 'ACTIVE' and p.account_status = 'CLOSED'
+                """, "ACTIVE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT", "BREAK_GLASS_CAPABILITY_ACTION", "HIGH");
+        return findings;
     }
 
     private int insertFindings(String selectSql, String type, String targetType, String severity) {

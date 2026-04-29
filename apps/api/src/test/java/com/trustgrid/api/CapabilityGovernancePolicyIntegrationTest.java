@@ -35,5 +35,20 @@ class CapabilityGovernancePolicyIntegrationTest extends Tg221To240IntegrationTes
         assertThat(denied.toString()).contains("CAPABILITY_RESTRICTED", "resolve or appeal the exact active restriction");
         assertThat(countRows("select count(*) from capability_decision_logs where participant_id = ?", seller))
                 .isGreaterThanOrEqualTo(2);
+
+        assertThat(post("/api/v1/capability-governance/policies", Map.of(
+                "actionName", "ACCEPT_TRANSACTION",
+                "policyName", "capability_policy",
+                "policyVersion", "missing_actor",
+                "reason", "Missing creator"
+        ), null).getStatusCode().value()).isEqualTo(400);
+
+        assertThat(post("/api/v1/capability-governance/policies", Map.of(
+                "actionName", "UNSUPPORTED_ACTION",
+                "policyName", "capability_policy",
+                "policyVersion", "unsupported",
+                "createdBy", "operator@example.com",
+                "reason", "Unsupported action"
+        ), null).getStatusCode().value()).isEqualTo(400);
     }
 }

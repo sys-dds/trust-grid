@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,10 +28,15 @@ public class CapabilityGovernanceService {
 
     @Transactional
     public Map<String, Object> createPolicy(Map<String, Object> request) {
+        String actionName = repository.required(request, "actionName");
+        if (!List.of("PUBLISH_LISTING", "ACCEPT_TRANSACTION", "OPEN_DISPUTE", "CREATE_REVIEW",
+                "RECEIVE_SEARCH_EXPOSURE", "REQUEST_PAYMENT_RELEASE").contains(actionName)) {
+            throw new IllegalArgumentException("Unsupported capability governance action");
+        }
         UUID id = repository.createPolicy(request);
         UUID participantId = repository.optionalUuid(request.get("participantId"));
         if (participantId != null) {
-            repository.timeline(participantId, repository.required(request, "actionName"), null, null,
+            repository.timeline(participantId, actionName, null, null,
                     "CAPABILITY_POLICY_CREATED", repository.required(request, "createdBy"),
                     repository.required(request, "reason"), Map.of("policyId", id));
         }
@@ -50,6 +56,125 @@ public class CapabilityGovernanceService {
 
     @Transactional
     public Map<String, Object> simulate(Map<String, Object> request) {
+        return evaluateCapability(request, true);
+    }
+
+    @Transactional
+    public Map<String, Object> replay(UUID decisionId) {
+        Map<String, Object> original = repository.decision(decisionId);
+        Map<String, Object> snapshot = repository.readMap(original.get("input_snapshot_json").toString());
+        Map<String, Object> replayRequest = new LinkedHashMap<>();
+        replayRequest.put("participantId", original.get("participant_id").toString());
+        replayRequest.put("actionName", original.get("action_name").toString());
+        replayRequest.put("targetType", string(original.get("target_type")));
+        if (original.get("target_id") != null) {
+            replayRequest.put("targetId", original.get("target_id").toString());
+        }
+        replayRequest.put("policyName", original.get("policy_name").toString());
+        replayRequest.put("policyVersion", original.get("policy_version").toString());
+        Map<String, Object> replayed = evaluateSnapshot(replayRequest, snapshot);
+        List<Map<String, Object>> originalReasons = repository.readList(original.get("deny_reasons_json").toString());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> replayedReasons = (List<Map<String, Object>>) replayed.get("denyReasons");
+        List<String> mismatches = new ArrayList<>();
+        if (!Objects.equals(original.get("decision"), replayed.get("decision"))) {
+            mismatches.add("decision changed");
+        }
+        if (!Objects.equals(reasonCodes(originalReasons), reasonCodes(replayedReasons))) {
+            mismatches.add("deny reasons changed");
+        }
+        if (!Objects.equals(original.get("policy_name"), replayed.get("policyName"))
+                || !Objects.equals(original.get("policy_version"), replayed.get("policyVersion"))) {
+            mismatches.add("policy changed");
+        }
+        UUID participantId = (UUID) original.get("participant_id");
+        repository.timeline(participantId, original.get("action_name").toString(), string(original.get("target_type")),
+                (UUID) original.get("target_id"), "CAPABILITY_DECISION_REPLAYED", "operator@example.com",
+                "Capability decision replay", Map.of("decisionId", decisionId, "matchedOriginal", mismatches.isEmpty()));
+        outboxRepository.insert("CAPABILITY_GOVERNANCE", decisionId, participantId, "CAPABILITY_DECISION_REPLAYED",
+                Map.of("matchedOriginal", mismatches.isEmpty()));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("decisionId", decisionId);
+        response.put("originalDecision", original.get("decision"));
+        response.put("replayedDecision", replayed.get("decision"));
+        response.put("matchedOriginal", mismatches.isEmpty());
+        response.put("mismatchReasons", mismatches);
+        response.put("deterministic", true);
+        response.put("policyName", original.get("policy_name"));
+        response.put("policyVersion", original.get("policy_version"));
+        response.put("actionName", original.get("action_name"));
+        response.put("targetType", original.get("target_type"));
+        response.put("targetId", original.get("target_id"));
+        response.put("originalSnapshot", snapshot);
+        response.put("replayedReasons", replayedReasons);
+        return response;
+    }
+
+    @Transactional
+    public Map<String, Object> blastRadiusPreview(Map<String, Object> request) {
+        String actionName = repository.required(request, "actionName");
+        List<UUID> candidates = repository.candidateParticipants((List<?>) request.get("candidateParticipantIds"));
+        int allowed = 0;
+        int denied = 0;
+        int manual = 0;
+        int verification = 0;
+        Map<String, Integer> reasonCounts = new LinkedHashMap<>();
+        List<Map<String, Object>> affected = new ArrayList<>();
+        for (UUID participantId : candidates) {
+            Map<String, Object> evaluationRequest = new LinkedHashMap<>(request);
+            evaluationRequest.put("participantId", participantId.toString());
+            evaluationRequest.put("actor", request.getOrDefault("requestedBy", "operator@example.com"));
+            evaluationRequest.put("reason", request.getOrDefault("reason", "Capability blast-radius preview"));
+            Map<String, Object> result = evaluateCapability(evaluationRequest, false);
+            String decision = result.get("decision").toString();
+            if (decision.startsWith("ALLOW")) {
+                allowed++;
+            } else {
+                denied++;
+                affected.add(Map.of("participantId", participantId, "decision", decision,
+                        "denyReasons", result.get("denyReasons")));
+            }
+            if ("REQUIRE_MANUAL_REVIEW".equals(decision)) {
+                manual++;
+            }
+            if ("REQUIRE_VERIFICATION".equals(decision)) {
+                verification++;
+            }
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> reasons = (List<Map<String, Object>>) result.get("denyReasons");
+            for (Map<String, Object> reason : reasons) {
+                String code = reason.get("code").toString();
+                reasonCounts.put(code, reasonCounts.getOrDefault(code, 0) + 1);
+            }
+        }
+        outboxRepository.insert("CAPABILITY_GOVERNANCE", UUID.randomUUID(), null, "CAPABILITY_BLAST_RADIUS_PREVIEWED",
+                Map.of("actionName", actionName, "candidateCount", candidates.size(), "deniedCount", denied));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("actionName", actionName);
+        response.put("candidateCount", candidates.size());
+        response.put("allowedCount", allowed);
+        response.put("deniedCount", denied);
+        response.put("manualReviewCount", manual);
+        response.put("requireVerificationCount", verification);
+        response.put("affectedParticipants", affected.stream().limit(25).toList());
+        response.put("topDenyReasons", reasonCounts.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .map(entry -> Map.of("code", entry.getKey(), "count", entry.getValue()))
+                .toList());
+        response.put("deterministic", true);
+        return response;
+    }
+
+    public Map<String, Object> auditBundle(UUID participantId) {
+        return repository.auditBundle(participantId);
+    }
+
+    public Map<String, Object> dashboard() {
+        return repository.dashboard();
+    }
+
+    private Map<String, Object> evaluateCapability(Map<String, Object> request, boolean recordDecision) {
         UUID participantId = repository.uuid(request, "participantId");
         String actionName = repository.required(request, "actionName");
         String targetType = string(request.get("targetType"));
@@ -74,7 +199,7 @@ public class CapabilityGovernanceService {
 
         var temporaryGrant = repository.matchingTemporaryGrant(participantId, actionName, targetType, targetId);
         var breakGlass = repository.matchingBreakGlass(participantId, actionName, targetType, targetId);
-        String decision = decision(denyReasons, temporaryGrant.isPresent(), breakGlass.isPresent());
+        String decision = decision(actionName, denyReasons, temporaryGrant.isPresent(), breakGlass.isPresent());
         List<Map<String, Object>> nextSteps = nextSteps(denyReasons);
         Map<String, Object> inputSnapshot = new LinkedHashMap<>();
         inputSnapshot.put("participant", publicParticipantSnapshot(participant));
@@ -84,21 +209,24 @@ public class CapabilityGovernanceService {
         inputSnapshot.put("valueCents", valueCents);
         temporaryGrant.ifPresent(grant -> inputSnapshot.put("appliedGrantId", grant.get("id")));
         breakGlass.ifPresent(override -> inputSnapshot.put("appliedBreakGlassId", override.get("id")));
-        UUID decisionId = repository.insertDecision(participantId, actionName, targetType, targetId, decision,
-                policy.get("policy_name").toString(), policy.get("policy_version").toString(),
-                denyReasons, nextSteps, inputSnapshot);
-        repository.timeline(participantId, actionName, targetType, targetId, "CAPABILITY_SIMULATED",
-                request.getOrDefault("actor", "operator@example.com").toString(),
-                request.getOrDefault("reason", "Capability simulation").toString(),
-                Map.of("decisionId", decisionId, "decision", decision, "denyReasonCount", denyReasons.size()));
-        repository.timeline(participantId, actionName, targetType, targetId, "CAPABILITY_DECISION_LOGGED",
-                request.getOrDefault("actor", "operator@example.com").toString(),
-                request.getOrDefault("reason", "Capability decision logged").toString(),
-                Map.of("decisionId", decisionId));
-        outboxRepository.insert("CAPABILITY_GOVERNANCE", decisionId, participantId, "CAPABILITY_SIMULATED",
-                Map.of("actionName", actionName, "decision", decision));
-        outboxRepository.insert("CAPABILITY_GOVERNANCE", decisionId, participantId, "CAPABILITY_DECISION_LOGGED",
-                Map.of("actionName", actionName, "decision", decision));
+        UUID decisionId = null;
+        if (recordDecision) {
+            decisionId = repository.insertDecision(participantId, actionName, targetType, targetId, decision,
+                    policy.get("policy_name").toString(), policy.get("policy_version").toString(),
+                    denyReasons, nextSteps, inputSnapshot);
+            repository.timeline(participantId, actionName, targetType, targetId, "CAPABILITY_SIMULATED",
+                    request.getOrDefault("actor", "operator@example.com").toString(),
+                    request.getOrDefault("reason", "Capability simulation").toString(),
+                    Map.of("decisionId", decisionId, "decision", decision, "denyReasonCount", denyReasons.size()));
+            repository.timeline(participantId, actionName, targetType, targetId, "CAPABILITY_DECISION_LOGGED",
+                    request.getOrDefault("actor", "operator@example.com").toString(),
+                    request.getOrDefault("reason", "Capability decision logged").toString(),
+                    Map.of("decisionId", decisionId));
+            outboxRepository.insert("CAPABILITY_GOVERNANCE", decisionId, participantId, "CAPABILITY_SIMULATED",
+                    Map.of("actionName", actionName, "decision", decision));
+            outboxRepository.insert("CAPABILITY_GOVERNANCE", decisionId, participantId, "CAPABILITY_DECISION_LOGGED",
+                    Map.of("actionName", actionName, "decision", decision));
+        }
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("decisionId", decisionId);
         response.put("participantId", participantId);
@@ -115,6 +243,49 @@ public class CapabilityGovernanceService {
         temporaryGrant.ifPresent(grant -> response.put("appliedGrantId", grant.get("id")));
         breakGlass.ifPresent(override -> response.put("appliedBreakGlassId", override.get("id")));
         return response;
+    }
+
+    private Map<String, Object> evaluateSnapshot(Map<String, Object> request, Map<String, Object> snapshot) {
+        String actionName = repository.required(request, "actionName");
+        Map<String, Object> policy = repository.policyFor(actionName, string(request.get("policyName")),
+                        string(request.get("policyVersion")))
+                .orElseGet(() -> defaultPolicy(actionName));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> participantSnapshot = (Map<String, Object>) snapshot.getOrDefault("participant", Map.of());
+        Map<String, Object> participant = new LinkedHashMap<>();
+        participant.put("account_status", participantSnapshot.getOrDefault("accountStatus", "ACTIVE"));
+        participant.put("verification_status", participantSnapshot.getOrDefault("verificationStatus", "UNVERIFIED"));
+        participant.put("trust_tier", participantSnapshot.getOrDefault("trustTier", "NEW"));
+        participant.put("risk_level", participantSnapshot.getOrDefault("riskLevel", "LOW"));
+        participant.put("trust_score", participantSnapshot.getOrDefault("trustScore", 500));
+        participant.put("trust_confidence", participantSnapshot.getOrDefault("trustConfidence", 0));
+        @SuppressWarnings("unchecked")
+        List<String> capabilities = (List<String>) snapshot.getOrDefault("activeCapabilities", List.of());
+        @SuppressWarnings("unchecked")
+        List<Object> restrictionValues = (List<Object>) snapshot.getOrDefault("activeRestrictions", List.of());
+        List<Map<String, Object>> restrictions = restrictionValues.stream()
+                .map(value -> Map.<String, Object>of("restriction_type", value.toString()))
+                .toList();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> target = (Map<String, Object>) snapshot.getOrDefault("target", Map.of());
+        Long valueCents = snapshot.get("valueCents") instanceof Number number ? number.longValue() : null;
+        List<Map<String, Object>> denyReasons = new ArrayList<>();
+        evaluateAccount(participant, denyReasons);
+        evaluateTrustTier(policy, participant, denyReasons);
+        evaluateVerification(policy, participant, denyReasons);
+        evaluateRisk(policy, participant, denyReasons);
+        evaluateCapabilities(policy, actionName, capabilities, denyReasons);
+        evaluateRestrictions(policy, actionName, restrictions, valueCents, denyReasons);
+        evaluateValue(policy, valueCents, denyReasons);
+        evaluateTarget(actionName, target, denyReasons);
+        String decision = decision(actionName, denyReasons, snapshot.containsKey("appliedGrantId"),
+                snapshot.containsKey("appliedBreakGlassId"));
+        return Map.of(
+                "decision", decision,
+                "denyReasons", denyReasons,
+                "policyName", policy.get("policy_name"),
+                "policyVersion", policy.get("policy_version")
+        );
     }
 
     @Transactional
@@ -339,13 +510,15 @@ public class CapabilityGovernanceService {
         }
     }
 
-    private String decision(List<Map<String, Object>> denyReasons, boolean temporaryGrant, boolean breakGlass) {
+    private String decision(String actionName, List<Map<String, Object>> denyReasons, boolean temporaryGrant, boolean breakGlass) {
         if (denyReasons.isEmpty()) {
             return "ALLOW";
         }
         boolean closed = hasReason(denyReasons, "ACCOUNT_CLOSED");
         boolean suspended = hasReason(denyReasons, "ACCOUNT_SUSPENDED");
-        if (breakGlass && !closed) {
+        boolean paymentReleaseBlocked = "REQUEST_PAYMENT_RELEASE".equals(actionName)
+                && (hasReason(denyReasons, "TRANSACTION_NOT_COMPLETED") || hasReason(denyReasons, "DISPUTE_UNRESOLVED"));
+        if (breakGlass && !closed && !paymentReleaseBlocked) {
             return "ALLOW_WITH_BREAK_GLASS";
         }
         if (temporaryGrant && !closed && !suspended) {
@@ -389,6 +562,10 @@ public class CapabilityGovernanceService {
 
     private boolean hasReason(List<Map<String, Object>> denyReasons, String code) {
         return denyReasons.stream().anyMatch(reason -> code.equals(reason.get("code")));
+    }
+
+    private List<String> reasonCodes(List<Map<String, Object>> reasons) {
+        return reasons.stream().map(reason -> reason.get("code").toString()).sorted().toList();
     }
 
     private Map<String, Object> reason(String code, String message, String field, Object current, Object required, String severity) {
