@@ -84,8 +84,8 @@ public class TrustCaseController {
     }
 
     @PostMapping("/api/v1/trust-cases/{caseId}/replay")
-    Map<String, Object> replay(@PathVariable UUID caseId) {
-        return service.replayCase(caseId);
+    Map<String, Object> replay(@PathVariable UUID caseId, @RequestBody(required = false) Map<String, Object> request) {
+        return service.replayCase(caseId, request == null ? Map.of() : request);
     }
 
     @GetMapping("/api/v1/trust-cases/metrics")

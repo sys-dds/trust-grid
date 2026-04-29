@@ -173,9 +173,29 @@ public class ConsistencyRepository {
                 where not exists (select 1 from trust_campaigns c where c.id = e.campaign_id)
                 """, "CAMPAIGN_GRAPH_INVALID", "CAMPAIGN_GRAPH_EDGE", "HIGH");
         findings += insertFindings("""
+                select a.id as target_id, 'Containment action is executed while parent plan is not executed' as message
+                from campaign_containment_actions a
+                join campaign_containment_plans p on p.id = a.containment_plan_id
+                where a.status = 'EXECUTED' and p.status not in ('EXECUTED','PARTIALLY_EXECUTED','REVERSED')
+                """, "CAMPAIGN_CONTAINMENT_ACTION_WITHOUT_EXECUTED_PLAN", "CONTAINMENT_ACTION", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Containment action is missing before or after snapshot' as message
+                from campaign_containment_actions
+                where before_json = '{}'::jsonb or after_json = '{}'::jsonb
+                """, "CAMPAIGN_CONTAINMENT_ACTION_SNAPSHOT_MISSING", "CONTAINMENT_ACTION", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Containment reversal has a conflict marker requiring review' as message
+                from campaign_containment_actions
+                where status = 'REVERSAL_CONFLICT'
+                """, "CAMPAIGN_CONTAINMENT_REVERSAL_CONFLICT", "CONTAINMENT_ACTION", "HIGH");
+        findings += insertFindings("""
                 select id as target_id, 'Evidence versions are not sequential' as message
                 from evidence_versions ev
                 where version_number <= 0
+                   or version_number <> (
+                     select count(*) from evidence_versions prev
+                     where prev.evidence_id = ev.evidence_id and prev.version_number <= ev.version_number
+                   )
                 """, "EVIDENCE_VERSION_SEQUENCE_INVALID", "EVIDENCE_VERSION", "MEDIUM");
         findings += insertFindings("""
                 select id as target_id, 'Evidence custody hash mismatch requires review' as message
@@ -188,15 +208,47 @@ public class ConsistencyRepository {
                 where transaction_id is not null and not exists (select 1 from marketplace_transactions t where t.id = g.transaction_id)
                 """, "GUARANTEE_REFERENCE_INVALID", "GUARANTEE_DECISION", "HIGH");
         findings += insertFindings("""
+                select g.id as target_id, 'Guarantee decision references a missing policy' as message
+                from guarantee_decision_logs g
+                where not exists (
+                    select 1 from marketplace_guarantee_policies p
+                    where p.policy_name = g.policy_name and p.policy_version = g.policy_version
+                )
+                """, "GUARANTEE_POLICY_MISSING", "GUARANTEE_DECISION", "HIGH");
+        findings += insertFindings("""
+                select guarantee_decision_id as target_id, 'Guarantee has duplicate payment-boundary recommendation records' as message
+                from guarantee_payment_boundary_recommendations
+                group by guarantee_decision_id, recommendation
+                having count(*) > 1
+                """, "GUARANTEE_DUPLICATE_PAYMENT_BOUNDARY_RECOMMENDATION", "GUARANTEE_DECISION", "MEDIUM");
+        findings += insertFindings("""
                 select id as target_id, 'Severe enforcement action has no approval signal' as message
                 from enforcement_actions
-                where action_type in ('SUSPEND_ACCOUNT','PERMANENT_REMOVAL_RECOMMENDED') and risk_acknowledgement is null
+                where action_type in ('SUSPEND_ACCOUNT','PERMANENT_REMOVAL_RECOMMENDED')
+                  and severe_action_approval_id is null
                 """, "ENFORCEMENT_APPROVAL_MISSING", "ENFORCEMENT_ACTION", "HIGH");
+        findings += insertFindings("""
+                select consumed_by_enforcement_action_id as target_id, 'Severe action approval consumption is inconsistent' as message
+                from severe_action_approvals
+                where consumed_at is not null
+                  and consumed_by_enforcement_action_id is null
+                """, "ENFORCEMENT_APPROVAL_CONSUMPTION_INVALID", "SEVERE_ACTION_APPROVAL", "HIGH");
+        findings += insertFindings("""
+                select id as target_id, 'Recovery recommendation attempted automatic severe restoration' as message
+                from marketplace_ops_queue_items
+                where queue_type = 'CAPABILITY_RESTORATION_REVIEW'
+                  and signals_json->>'automaticRestore' = 'true'
+                """, "RECOVERY_AUTOMATIC_SEVERE_RESTORATION", "RECOVERY_RECOMMENDATION", "HIGH");
         findings += insertFindings("""
                 select id as target_id, 'Adversarial run has no expected controls recorded' as message
                 from adversarial_attack_runs r
                 where not exists (select 1 from detection_coverage_matrix m where m.attack_run_id = r.id and m.expected = true)
                 """, "ADVERSARIAL_COVERAGE_MISSING", "ATTACK_RUN", "MEDIUM");
+        findings += insertFindings("""
+                select id as target_id, 'Scale seed requested data but created no bounded synthetic rows' as message
+                from trust_scale_seed_runs
+                where counts_json::text <> '{}' and metrics_json->'createdCounts' is null
+                """, "SCALE_SEED_ZERO_CREATED", "SCALE_SEED_RUN", "MEDIUM");
         findings += insertFindings("""
                 select id as target_id, 'Trust dossier snapshot target requires review' as message
                 from trust_dossier_snapshots

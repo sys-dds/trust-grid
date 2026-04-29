@@ -36,6 +36,7 @@ public class DataRepairRepository {
                          when f.finding_type = 'ACTIVE_GRANT_FOR_CLOSED_PARTICIPANT' then 'REVOKE_GRANT_FOR_CLOSED_PARTICIPANT'
                          when f.finding_type = 'ACTIVE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT' then 'REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT'
                          when f.finding_type like 'TRUST_CASE_%' then 'REQUEST_TRUST_CASE_TARGET_REVIEW'
+                         when f.finding_type like 'CAMPAIGN_CONTAINMENT_%' then 'REQUEST_CONTAINMENT_REVERSAL_REVIEW'
                          when f.finding_type like 'CAMPAIGN_%' then 'REQUEST_CAMPAIGN_GRAPH_REBUILD'
                          when f.finding_type like 'EVIDENCE_%' then 'REQUEST_EVIDENCE_CUSTODY_REVIEW'
                          when f.finding_type like 'GUARANTEE_%' then 'REQUEST_GUARANTEE_MANUAL_REVIEW'
@@ -43,6 +44,7 @@ public class DataRepairRepository {
                          when f.finding_type like 'RECOVERY_%' then 'REQUEST_RECOVERY_REVIEW'
                          when f.finding_type like 'ADVERSARIAL_%' then 'REQUEST_ADVERSARIAL_COVERAGE_REVIEW'
                          when f.finding_type like 'TRUST_DOSSIER_%' then 'REQUEST_TRUST_DOSSIER_REBUILD'
+                         when f.finding_type like 'SCALE_SEED_%' then 'REQUEST_SCALE_SEED_REVIEW'
                          else 'REQUEST_OPERATOR_REVIEW'
                        end,
                        f.target_type, f.target_id, f.severity,
@@ -154,12 +156,14 @@ public class DataRepairRepository {
             case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT";
             case "REQUEST_TRUST_CASE_TARGET_REVIEW" -> "REQUEST_TRUST_CASE_TARGET_REVIEW";
             case "REQUEST_CAMPAIGN_GRAPH_REBUILD" -> "REQUEST_CAMPAIGN_GRAPH_REBUILD";
+            case "REQUEST_CONTAINMENT_REVERSAL_REVIEW" -> "REQUEST_CONTAINMENT_REVERSAL_REVIEW";
             case "REQUEST_EVIDENCE_CUSTODY_REVIEW" -> "REQUEST_EVIDENCE_CUSTODY_REVIEW";
             case "REQUEST_GUARANTEE_MANUAL_REVIEW" -> "REQUEST_GUARANTEE_MANUAL_REVIEW";
             case "REQUEST_ENFORCEMENT_QA_REVIEW" -> "REQUEST_ENFORCEMENT_QA_REVIEW";
             case "REQUEST_RECOVERY_REVIEW" -> "REQUEST_RECOVERY_REVIEW";
             case "REQUEST_ADVERSARIAL_COVERAGE_REVIEW" -> "REQUEST_ADVERSARIAL_COVERAGE_REVIEW";
             case "REQUEST_TRUST_DOSSIER_REBUILD" -> "REQUEST_TRUST_DOSSIER_REBUILD";
+            case "REQUEST_SCALE_SEED_REVIEW" -> "REQUEST_SCALE_SEED_REVIEW";
             default -> "MARK_FINDING_RESOLVED";
         };
     }
@@ -179,10 +183,11 @@ public class DataRepairRepository {
             case "REQUEST_CAPABILITY_DECISION_REVIEW" -> requestOperatorReview(recommendation, request);
             case "REVOKE_GRANT_FOR_CLOSED_PARTICIPANT" -> revokeGrantForClosedParticipant(targetId, request);
             case "REVOKE_BREAK_GLASS_FOR_CLOSED_PARTICIPANT" -> revokeBreakGlassForClosedParticipant(targetId, request);
-            case "REQUEST_TRUST_CASE_TARGET_REVIEW", "REQUEST_CAMPAIGN_GRAPH_REBUILD",
+            case "REQUEST_TRUST_CASE_TARGET_REVIEW", "REQUEST_CAMPAIGN_GRAPH_REBUILD", "REQUEST_CONTAINMENT_REVERSAL_REVIEW",
                     "REQUEST_EVIDENCE_CUSTODY_REVIEW", "REQUEST_GUARANTEE_MANUAL_REVIEW",
                     "REQUEST_ENFORCEMENT_QA_REVIEW", "REQUEST_RECOVERY_REVIEW",
-                    "REQUEST_ADVERSARIAL_COVERAGE_REVIEW", "REQUEST_TRUST_DOSSIER_REBUILD" ->
+                    "REQUEST_ADVERSARIAL_COVERAGE_REVIEW", "REQUEST_TRUST_DOSSIER_REBUILD",
+                    "REQUEST_SCALE_SEED_REVIEW" ->
                     requestOperatorReview(recommendation, request);
             case "MANUAL_REPAIR_REQUIRED" -> Map.of("repairExecuted", "MANUAL_REPAIR_RECORDED", "autoRepair", false);
             default -> Map.of("repairExecuted", "MARK_FINDING_RESOLVED", "autoRepair", false);
